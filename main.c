@@ -9,6 +9,12 @@
 #include <SDL.h>
 #include "xoshiro256plusplus.h"
 
+static inline int triangle_area2(int x1, int y1, int x2, int y2, int x3, int y3)
+{
+	const int area = x1*(y2-y3) + x2*(y3-y1) + x3*(y1-y2);
+	return area >= 0 ? area : -area;
+}
+
 static inline const char* gl_err_string(GLenum err)
 {
 	switch (err) {
@@ -310,7 +316,6 @@ static void mode_process(const char* image_path)
 	glBindTexture(GL_TEXTURE_2D, canvas_tex); CHKGL;
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); CHKGL;
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST); CHKGL;
-
 	GLint internal_format;
 	GLenum format;
 	int pixel_size = -1;
@@ -334,40 +339,43 @@ static void mode_process(const char* image_path)
 		fprintf(stderr, "unhandled number of image channels: %d\n", n_channels);
 		exit(EXIT_FAILURE);
 	}
-
 	assert((((width*pixel_size) & 3) == 0) && "FIXME unaligned rows; use glPixelStorei(GL_UNPACK_ALIGNMENT, 1)?");
-
 	glTexImage2D(GL_TEXTURE_2D, /*level=*/0, internal_format, width, height, /*border=*/0, format, GL_UNSIGNED_SHORT, source_image); CHKGL;
+	glBindTexture(GL_TEXTURE_2D, 0); CHKGL;
 
-	#if 0
-	GLuint dummy_fb;
-	glGenFramebuffers(1, &dummy_fb); CHKGL;
+	GLuint fb;
+	glGenFramebuffers(1, &fb); CHKGL;
 
 	GLuint dummy_fb_tex;
 	glGenTextures(1, &dummy_fb_tex); CHKGL;
 	glBindTexture(GL_TEXTURE_2D, dummy_fb_tex); CHKGL;
 	glTexImage2D(GL_TEXTURE_2D, /*level=*/0, GL_RED, width, height, /*border=*/0, GL_RED, GL_UNSIGNED_BYTE, NULL); CHKGL;
-	#endif
-
-	#if 0
-	glBindFramebuffer(GL_FRAMEBUFFER, vw->framebuffer); CHKGL;
-	glViewport(0, 0, fb_width, fb_height);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, vw->texture, /*level=*/0); CHKGL;
-	assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
-	#endif
 
 	glBindTexture(GL_TEXTURE_2D, 0); CHKGL;
 
-	const int max_trials_log2 = 14;
-	const int max_trials = 1 << max_trials_log2;
+	const int trial_batch_size_log2 = 5;
+
+	const int n_trials_per_primitive = 320; // TODO configurable?
+	const int n_trial_elems = 3 + n_channels;
+	const int trial_stride = sizeof(uint16_t) * n_trial_elems;
+
+	const int n_paint_elems = 2 + n_channels;
+	const int paint_stride = sizeof(uint16_t) * n_paint_elems;
 
 	GLuint vao;
 	glGenVertexArrays(1, &vao); CHKGL;
 
-	GLuint vbo;
-	glGenBuffers(1, &vbo); CHKGL;
-	glBindBuffer(GL_ARRAY_BUFFER, vbo); CHKGL;
-	glBufferData(GL_ARRAY_BUFFER, max_trials * sizeof(uint16_t), NULL, GL_DYNAMIC_DRAW); CHKGL;
+	GLuint trial_vbo;
+	glGenBuffers(1, &trial_vbo); CHKGL;
+	glBindBuffer(GL_ARRAY_BUFFER, trial_vbo); CHKGL;
+	glBufferData(GL_ARRAY_BUFFER, (1 << trial_batch_size_log2) * 3 * trial_stride, NULL, GL_DYNAMIC_DRAW); CHKGL;
+	glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
+
+	GLuint paint_vbo;
+	glGenBuffers(1, &paint_vbo); CHKGL;
+	glBindBuffer(GL_ARRAY_BUFFER, paint_vbo); CHKGL;
+	const size_t paint_vbo_sz = 1<<14;
+	glBufferData(GL_ARRAY_BUFFER, paint_vbo_sz, NULL, GL_DYNAMIC_DRAW); CHKGL;
 	glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
 
 	const char* define_colortype_str = NULL;
@@ -384,7 +392,7 @@ static void mode_process(const char* image_path)
 	default: assert(!"unhandled n_channels");
 	}
 
-	const int n_signal_u32s = 1 << (max_trials_log2 - 5);
+	const int n_signal_u32s = 1 << (trial_batch_size_log2 - 5);
 	assert(g.max_fragment_atomic_counters >= n_signal_u32s);
 	char n_signal_u32s_str[1<<5];
 	snprintf(n_signal_u32s_str, sizeof n_signal_u32s_str, "%d", n_signal_u32s);
@@ -395,6 +403,62 @@ static void mode_process(const char* image_path)
 	const size_t atomic_buffer_sz = n_signal_u32s * sizeof(GLuint);
 	glBufferData(GL_ATOMIC_COUNTER_BUFFER, atomic_buffer_sz, NULL, GL_DYNAMIC_DRAW);
 	glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, 0);
+
+	const char* paint_sources[] = {
+	// vertex
+	"#version 460\n"
+	"\n"
+	, define_colortype_str ,
+	"\n"
+	"layout (location = 0) uniform vec2 u_scale;\n"
+	"\n"
+	"in vec2 a_pos;\n"
+	"in COLORTYPE a_color;\n"
+	"\n"
+	"out COLORTYPE v_color;\n"
+	"\n"
+	"void main()\n"
+	"{\n"
+	"	v_color = a_color;\n"
+	"	vec2 c = a_pos * u_scale;\n"
+	"	vec2 pos = vec2(-1.0,  1.0) + c * vec2(2.0, -2.0);\n"
+	"	gl_Position = vec4(pos, 0.0, 1.0);\n"
+	"}\n"
+
+	,
+
+	// fragment
+	"#version 460\n"
+	"\n"
+	, define_colortype_str ,
+	"\n"
+	"in COLORTYPE v_color;\n"
+	"\n"
+	"layout (location = 0) out vec4 frag_color;\n"
+	"\n"
+	"void main()\n"
+	"{\n"
+	,
+	(
+	n_channels == 1 ?
+	"	frag_color = vec4(v_color, v_color, v_color, 1.0);\n"
+	: n_channels == 3 ?
+	"	frag_color = vec4(v_color, 1.0);\n"
+	: n_channels == 4 ?
+	"	frag_color = v_color;\n"
+	: "BANG"
+	)
+	,
+	"}\n"
+	};
+
+	GLuint paint_prg = mk_render_program(3, 5, paint_sources);
+
+	const GLint paint_uloc_scale = glGetUniformLocation(paint_prg, "u_scale");
+
+	const GLint paint_aloc_pos    = glGetAttribLocation(paint_prg, "a_pos");
+	const GLint paint_aloc_color  = glGetAttribLocation(paint_prg, "a_color");
+
 
 	const char* trial_sources[] = {
 	// vertex
@@ -420,7 +484,7 @@ static void mode_process(const char* image_path)
 	"	v_color = a_color;\n"
 	"	v_signal_arrindex = uint(a_signal) >> 5u;\n"
 	"	v_signal_mask = 1u << (uint(a_signal) & 31u);\n"
-	"	vec2 pos = vec2(-1.0, -1.0) + c * 2.0;\n"
+	"	vec2 pos = vec2(-1.0,  1.0) + c * vec2(2.0, -2.0);\n"
 	"	gl_Position = vec4(pos, 0.0, 1.0);\n"
 	"}\n"
 
@@ -480,168 +544,303 @@ static void mode_process(const char* image_path)
 
 	GLuint trial_prg = mk_render_program(3, 9, trial_sources);
 
-	const GLint uloc_scale = glGetUniformLocation(trial_prg, "u_scale");
-	const GLint uloc_canvas_tex = glGetUniformLocation(trial_prg, "u_canvas_tex");
+	const GLint trial_uloc_scale = glGetUniformLocation(trial_prg, "u_scale");
+	const GLint trial_uloc_canvas_tex = glGetUniformLocation(trial_prg, "u_canvas_tex");
 
-	const GLint aloc_pos    = glGetAttribLocation(trial_prg, "a_pos");
-	const GLint aloc_signal = glGetAttribLocation(trial_prg, "a_signal");
-	const GLint aloc_color  = glGetAttribLocation(trial_prg, "a_color");
+	const GLint trial_aloc_pos    = glGetAttribLocation(trial_prg, "a_pos");
+	const GLint trial_aloc_signal = glGetAttribLocation(trial_prg, "a_signal");
+	const GLint trial_aloc_color  = glGetAttribLocation(trial_prg, "a_color");
 
 	struct xoshiro256 rng;
 	xoshiro256_seed(&rng, 0);
 
 	uint16_t* vs = NULL;
 
-	glDisable(GL_CULL_FACE); CHKGL;
-	//glEnable(GL_BLEND); CHKGL;
+	//glDisable(GL_CULL_FACE); CHKGL;
+	glEnable(GL_BLEND); CHKGL;
+
+	double best_score;
+	uint16_t best_triangle[3*n_paint_elems];
+	uint16_t* chosen_vs = NULL;
+
+	int next_primitve = 1;
+
+	uint64_t canvas_accum;
+	int canvas_n_weights;
+	int trial_counter;
 
 	while (frame()) {
-		glBindTexture(GL_TEXTURE_2D, canvas_tex); CHKGL;
-		{
-			int tw, th;
-			glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tw);
-			glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &th);
-			assert(tw == width);
-			assert(th == height);
-		}
-		glGetTexImage(GL_TEXTURE_2D, 0, format, GL_UNSIGNED_SHORT, canvas_image);
-		glBindTexture(GL_TEXTURE_2D, 0); CHKGL;
+		if (next_primitve) {
+			trial_counter = 0;
+			next_primitve = 0;
+			best_score = 0.0;
 
-		uint16_t* p = canvas_image;
-		uint64_t accum = 0;
-		uint64_t* cwp = canvas_cum_weight;
-		int* cip = canvas_cum_idx;
-		int pixel_index = 0;
-		for (int y = 0; y < height; y++) {
-			for (int x = 0; x < width; x++) {
-				int s = 0;
-				for (int i = 0; i < n_channels; i++) {
-					// TODO weight RGB?
-					uint16_t v = *(p++);
-					//printf("%d\n", (int)v);
-					s += v;
-				}
-				if (s > 0) {
-					accum += s;
-					*(cwp++) = accum;
-					*(cip++) = pixel_index;
-				}
-				pixel_index++;
+			glBindTexture(GL_TEXTURE_2D, canvas_tex); CHKGL;
+			{
+				int tw, th;
+				glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tw);
+				glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &th);
+				assert(tw == width);
+				assert(th == height);
 			}
+			glGetTexImage(GL_TEXTURE_2D, 0, format, GL_UNSIGNED_SHORT, canvas_image);
+			glBindTexture(GL_TEXTURE_2D, 0); CHKGL;
+
+			uint16_t* p = canvas_image;
+			canvas_accum = 0;
+			uint64_t* cwp = canvas_cum_weight;
+			int* cip = canvas_cum_idx;
+			int pixel_index = 0;
+			for (int y = 0; y < height; y++) {
+				for (int x = 0; x < width; x++) {
+					int s = 0;
+					for (int i = 0; i < n_channels; i++) {
+						// TODO weight RGB?
+						uint16_t v = *(p++);
+						//printf("%d\n", (int)v);
+						s += v;
+					}
+					if (s > 0) {
+						canvas_accum += s;
+						*(cwp++) = canvas_accum;
+						*(cip++) = pixel_index;
+					}
+					pixel_index++;
+				}
+			}
+			canvas_n_weights = cwp - canvas_cum_weight;
 		}
-		const int n_weights = cwp - canvas_cum_weight;
-		//printf("%d/%d\n", n_weights, width*height);
 
 		arrsetlen(vs, 0);
 
-		const int n_trials = 32;
-		const int stride = 2 * (3 + n_channels);
-		for (int trial = 0; trial < n_trials; trial++) {
+		int batch_trial_index = 0;
+		const int trial_batch_size = 1 << trial_batch_size_log2;
+		for (batch_trial_index = 0; batch_trial_index < trial_batch_size && trial_counter < n_trials_per_primitive; batch_trial_index++, trial_counter++) {
 			for (int point = 0; point < 3; point++) {
-				uint64_t find = xoshiro256_next(&rng) % accum;
+				uint64_t find = xoshiro256_next(&rng) % canvas_accum;
 
 				int left = 0;
-				int right = n_weights;
+				int right = canvas_n_weights;
 				int n_iterations = 0;
 				while (left < right) {
 					n_iterations++;
 					int mid = (left + right) >> 1;
 					uint64_t wk = canvas_cum_weight[mid];
-					//printf("i=%d xs[%d]=%lu v k=%lu\n", n_iterations, mid, wk, find);
 					if (wk > find) {
 						right = mid;
 					} else {
 						left = mid + 1;
 					}
 				}
-				
+
 				const int idx = canvas_cum_idx[right-1];
 				const int px = idx % width;
 				const int py = idx / width;
 				uint16_t* pixel = &canvas_image[idx*n_channels];
-				#if 0
-				printf("chose %d,%d after %d iter c[", px,py,n_iterations);
-				for (int c = 0; c < n_channels; c++) {
-					printf("%s%d", c>0?",":"", (int)canvas_image[idx*n_channels+c]);
-				}
-				printf("]\n");
-				#endif
 
 				{
 					uint16_t* v0 = arraddnptr(vs, 3+n_channels);
 					uint16_t* v = v0;
 					*(v++) = px;
 					*(v++) = py;
-					//printf("%d %d (%d %d)\n", trial, point, px, py);
-					*(v++) = trial;
+					*(v++) = batch_trial_index;
 					for (int i = 0; i < n_channels; i++) {
-						*(v++) = pixel[i];
+						*(v++) = pixel[i] >> 1;
 					}
-					assert((v-v0) == (stride / sizeof(*v)));
+					assert((v-v0) == n_trial_elems);
 				}
 			}
 		}
+		const int batch_size = batch_trial_index;
+
+		glBindFramebuffer(GL_FRAMEBUFFER, fb); CHKGL;
+		glViewport(0, 0, width, height);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dummy_fb_tex, /*level=*/0); CHKGL;
+		assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
 
 		glUseProgram(trial_prg); CHKGL;
 
 		glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, signal_buf); CHKGL;
 		{
 			GLuint* a = glMapBufferRange(
-				GL_ATOMIC_COUNTER_BUFFER, 
+				GL_ATOMIC_COUNTER_BUFFER,
 				0, atomic_buffer_sz,
 				GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT | GL_MAP_UNSYNCHRONIZED_BIT); CHKGL;
 			memset(a, 0, atomic_buffer_sz);
 			glUnmapBuffer(GL_ATOMIC_COUNTER_BUFFER); CHKGL;
 		}
 
-		glBindBuffer(GL_ARRAY_BUFFER, vbo); CHKGL;
 
 		glBindBufferRange(GL_ATOMIC_COUNTER_BUFFER, 0, signal_buf, 0, atomic_buffer_sz); CHKGL;
 
-		//printf("S=%zd / %d / %d\n", sizeof(vs[0]) * arrlen(vs), n_trials, sizeof(vs[0]) * arrlen(vs) / n_trials);
+		glBindBuffer(GL_ARRAY_BUFFER, trial_vbo); CHKGL;
 		glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vs[0]) * arrlen(vs), vs); CHKGL;
 
 		glBindVertexArray(vao); CHKGL;
-		glEnableVertexAttribArray(aloc_pos); CHKGL;
-		glEnableVertexAttribArray(aloc_signal); CHKGL;
-		glEnableVertexAttribArray(aloc_color); CHKGL;
+		glEnableVertexAttribArray(trial_aloc_pos); CHKGL;
+		glEnableVertexAttribArray(trial_aloc_signal); CHKGL;
+		glEnableVertexAttribArray(trial_aloc_color); CHKGL;
 
-		//printf("%d %d %d\n", aloc_pos, aloc_signal, aloc_color);
-		glVertexAttribPointer(aloc_pos, 2, GL_UNSIGNED_SHORT, GL_TRUE, stride, (void*)0); CHKGL;
-		glVertexAttribPointer(aloc_signal, 1, GL_UNSIGNED_SHORT, GL_FALSE, stride, (void*)4); CHKGL;
-		glVertexAttribPointer(aloc_color,  n_channels, GL_UNSIGNED_SHORT, GL_TRUE,  stride, (void*)6); CHKGL;
+		//printf("%d %d %d\n", trial_aloc_pos, trial_aloc_signal, trial_aloc_color);
+		glVertexAttribPointer(trial_aloc_pos, 2, GL_UNSIGNED_SHORT, GL_TRUE, trial_stride, (void*)0); CHKGL;
+		glVertexAttribPointer(trial_aloc_signal, 1, GL_UNSIGNED_SHORT, GL_FALSE, trial_stride, (void*)4); CHKGL;
+		glVertexAttribPointer(trial_aloc_color,  n_channels, GL_UNSIGNED_SHORT, GL_TRUE,  trial_stride, (void*)6); CHKGL;
 
 
 		glBindTexture(GL_TEXTURE_2D, canvas_tex); CHKGL;
-		glUniform2f(uloc_scale, 65536.0f / (float)width, 65536.0f / (float)height); CHKGL;
-		glUniform1i(uloc_canvas_tex, 0); CHKGL;
+		glUniform2f(trial_uloc_scale, 65536.0f / (float)width, 65536.0f / (float)height); CHKGL;
+		glUniform1i(trial_uloc_canvas_tex, 0); CHKGL;
 
-		glDrawArrays(GL_TRIANGLES, 0, 3*n_trials); CHKGL;
-
-		glFlush(); CHKGL; // XXX?
+		printf("%d\n", batch_size);
+		glDrawArrays(GL_TRIANGLES, 0, 3*batch_size); CHKGL;
 
 		{
 			GLuint* a = glMapBufferRange(
-				GL_ATOMIC_COUNTER_BUFFER, 
+				GL_ATOMIC_COUNTER_BUFFER,
 				0, atomic_buffer_sz,
 				GL_MAP_READ_BIT);
-			for (int i = 0; i < (n_trials>>5); i++) {
-				printf("u_signal[%d]=%u\n", i, a[i]);
+
+			{
+				int i1 = 0;
+				printf("trials=[");
+				for (int i0 = 0; i0 < ((batch_size+31)>>5); i0++) {
+					for (; i1 < ((i0<<5)+32) && i1 < batch_size; i1++) {
+						const int underflow = a[i0] & (1 << (i1&31));
+						//printf("u_signal[%d]=%u\n", i0, a[i0]);
+						printf("%c", underflow ? '1' : '0');
+					}
+				}
+				printf("]\n");
 			}
+
+			{
+				int i1 = 0;
+				for (int i0 = 0; i0 < ((batch_size+31)>>5); i0++) {
+					for (; i1 < ((i0<<5)+32) && i1 < batch_size; i1++) {
+						const int underflow = a[i0] & (1 << (i1&31));
+						if (underflow) continue;
+						uint16_t* v0 = &vs[3*n_trial_elems*i1];
+						//printf("%d\n", i1);
+						uint16_t* v1 = v0;
+						int color_weight = 0;
+						for (int i2 = 0; i2 < 3; i2++) {
+							assert(v1[2] == i1);
+							v1 += n_trial_elems;
+							for (int i3 = 0; i3 < n_channels; i3++) {
+								// TODO gray scale weight?
+								color_weight += v1[3+i3];
+							}
+						}
+
+						const int area2 = triangle_area2(
+							v0[0*n_trial_elems+0], v0[0*n_trial_elems+1],
+							v0[1*n_trial_elems+0], v0[1*n_trial_elems+1],
+							v0[2*n_trial_elems+0], v0[2*n_trial_elems+1]
+						);
+
+						const double score = (double)area2 * (double)color_weight;
+						if (score > best_score) {
+							best_score = score;
+							printf("new best %f\n", score);
+							uint16_t* src = &vs[3*n_trial_elems*i1];
+							uint16_t* dst = best_triangle;
+							for (int i = 0; i < 3; i++) {
+								*(dst++) = *(src++);
+								*(dst++) = *(src++);
+								src++;
+								for (int j = 0; j < n_channels; j++) {
+									*(dst++) = *(src++);
+								}
+							}
+						}
+
+					}
+				}
+			}
+
 			glUnmapBuffer(GL_ATOMIC_COUNTER_BUFFER); CHKGL;
 		}
 
 		glBindTexture(GL_TEXTURE_2D, 0); CHKGL;
 
-
-		glDisableVertexAttribArray(aloc_color); CHKGL;
-		glDisableVertexAttribArray(aloc_signal); CHKGL;
-		glDisableVertexAttribArray(aloc_pos); CHKGL;
+		glDisableVertexAttribArray(trial_aloc_color); CHKGL;
+		glDisableVertexAttribArray(trial_aloc_signal); CHKGL;
+		glDisableVertexAttribArray(trial_aloc_pos); CHKGL;
 		glBindVertexArray(0); CHKGL;
 
 		glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
 		glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, 0); CHKGL;
 		glUseProgram(0); CHKGL;
+
+		glBindFramebuffer(GL_FRAMEBUFFER, 0); CHKGL;
+		glViewport(0, 0, g.width, g.height);
+
+		if (trial_counter == n_trials_per_primitive) {
+			uint16_t* vout = arraddnptr(chosen_vs, 3*n_paint_elems);
+			memcpy(vout, best_triangle, sizeof best_triangle);
+			next_primitve = 1;
+
+			glBindBuffer(GL_ARRAY_BUFFER, paint_vbo); CHKGL;
+			const size_t blitsz = sizeof(chosen_vs[0]) * arrlen(chosen_vs);
+			assert(blitsz <= paint_vbo_sz);
+			glBufferSubData(GL_ARRAY_BUFFER, 0, blitsz, chosen_vs); CHKGL;
+			glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
+
+			// update canvas
+
+			glBindFramebuffer(GL_FRAMEBUFFER, fb); CHKGL;
+			glViewport(0, 0, width, height);
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, canvas_tex, /*level=*/0); CHKGL;
+			assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+			glUseProgram(paint_prg); CHKGL;
+			glBindVertexArray(vao); CHKGL;
+			glBindBuffer(GL_ARRAY_BUFFER, paint_vbo); CHKGL;
+			glEnableVertexAttribArray(paint_aloc_pos); CHKGL;
+			glEnableVertexAttribArray(paint_aloc_color); CHKGL;
+
+			glVertexAttribPointer(paint_aloc_pos, 2, GL_UNSIGNED_SHORT, GL_TRUE, paint_stride, (void*)0); CHKGL;
+			glVertexAttribPointer(paint_aloc_color,  n_channels, GL_UNSIGNED_SHORT, GL_TRUE,  paint_stride, (void*)4); CHKGL;
+			glUniform2f(paint_uloc_scale, 65536.0f / (float)width, 65536.0f / (float)height); CHKGL;
+
+			glBlendFunc(GL_ONE, GL_ONE); CHKGL;
+			glBlendEquation(GL_FUNC_REVERSE_SUBTRACT); CHKGL;
+
+			glDrawArrays(GL_TRIANGLES, arrlen(chosen_vs)/n_paint_elems-3, 3); CHKGL;
+			glBlendEquation(GL_FUNC_ADD); CHKGL;
+
+			glDisableVertexAttribArray(paint_aloc_color); CHKGL;
+			glDisableVertexAttribArray(paint_aloc_pos); CHKGL;
+			glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
+			glBindVertexArray(0); CHKGL;
+			glUseProgram(0); CHKGL;
+
+
+			glBindFramebuffer(GL_FRAMEBUFFER, 0); CHKGL;
+			glViewport(0, 0, g.width, g.height);
+		}
+
+		if (arrlen(chosen_vs) > 0) {
+			glUseProgram(paint_prg); CHKGL;
+			glBindVertexArray(vao); CHKGL;
+			glBindBuffer(GL_ARRAY_BUFFER, paint_vbo); CHKGL;
+			glEnableVertexAttribArray(paint_aloc_pos); CHKGL;
+			glEnableVertexAttribArray(paint_aloc_color); CHKGL;
+
+			glVertexAttribPointer(paint_aloc_pos, 2, GL_UNSIGNED_SHORT, GL_TRUE, paint_stride, (void*)0); CHKGL;
+			glVertexAttribPointer(paint_aloc_color,  n_channels, GL_UNSIGNED_SHORT, GL_TRUE,  paint_stride, (void*)4); CHKGL;
+			glUniform2f(paint_uloc_scale, 65536.0f / (float)width, 65536.0f / (float)height); CHKGL;
+
+			glBlendFunc(GL_ONE, GL_ONE); CHKGL;
+
+			glDrawArrays(GL_TRIANGLES, 0, arrlen(chosen_vs)/n_paint_elems); CHKGL;
+
+			glDisableVertexAttribArray(paint_aloc_color); CHKGL;
+			glDisableVertexAttribArray(paint_aloc_pos); CHKGL;
+			glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
+			glBindVertexArray(0); CHKGL;
+			glUseProgram(0); CHKGL;
+		}
+
 	}
 }
 
@@ -656,16 +855,6 @@ int main(int argc, char** argv)
 		if (argc < 3) usagef("image is missing\n");
 		const char* image_path = argv[2];
 		mode_process(image_path);
-		#if 0
-		int w, h, n_channels;
-		const char* image_path = argv[2];
-		uint16_t* im = stbi_load_16(image_path, &w, &h, &n_channels, 0);
-		if (im == NULL) {
-			fprintf(stderr, "%s: could not read\n", image_path);
-			exit(EXIT_FAILURE);
-		}
-		printf("%d×%dc%d\n", w, h, n_channels);
-		#endif
 	} else if (strcmp("view", cmd) == 0) {
 		assert(!"TODO");
 	} else if (strcmp("render", cmd) == 0) {
@@ -677,7 +866,3 @@ int main(int argc, char** argv)
 	return EXIT_SUCCESS;
 
 }
-
-/*
-glBlendEquation(GL_FUNC_REVERSE_SUBTRACT);
-*/

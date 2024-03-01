@@ -1,7 +1,7 @@
 CFLAGS+=-std=c11
 #CFLAGS+=-O0 -g
 LDLIBS+=-lm
-CFLAGS+=-O0
+CFLAGS+=-O0 -g
 #CFLAGS+=-O3
 #CFLAGS+=-Wall
 
