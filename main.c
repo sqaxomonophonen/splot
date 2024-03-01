@@ -578,13 +578,13 @@ static void mode_process(const char* image_path)
 	(
 	n_channels == 1 ?
 	"	COLORTYPE d = texture(u_canvas_tex, v_uv).x - v_color;\n"
-	"	if (d <= 0.0) {\n"
+	"	if (d < 0.0) {\n"
 	: n_channels == 3 ?
 	"	COLORTYPE d = texture(u_canvas_tex, v_uv).xyz - v_color;\n"
-	"	if (d.x <= 0.0 || d.y <= 0.0 || d.z <= 0.0) {\n"
+	"	if (d.x < 0.0 || d.y < 0.0 || d.z < 0.0) {\n"
 	: n_channels == 4 ?
 	"	COLORTYPE d = texture(u_canvas_tex, v_uv) - v_color;\n"
-	"	if (d.x <= 0.0 || d.y <= 0.0 || d.z <= 0.0 || d.w <= 0.0) {\n"
+	"	if (d.x < 0.0 || d.y < 0.0 || d.z < 0.0 || d.w < 0.0) {\n"
 	: "BANG"
 	)
 	,
