@@ -445,16 +445,16 @@ static void mode_process(const char* image_path)
 	glBufferData(GL_ARRAY_BUFFER, paint_vbo_sz, NULL, GL_DYNAMIC_DRAW); CHKGL;
 	glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
 
-	const char* define_colortype_str = NULL;
+	const char* define_colortype_glsl = NULL;
 	switch (n_channels) {
 	case 1:
-		define_colortype_str = "#define COLORTYPE float\n";
+		define_colortype_glsl = "#define COLORTYPE float\n";
 		break;
 	case 3:
-		define_colortype_str = "#define COLORTYPE vec3\n";
+		define_colortype_glsl = "#define COLORTYPE vec3\n";
 		break;
 	case 4:
-		define_colortype_str = "#define COLORTYPE vec4\n";
+		define_colortype_glsl = "#define COLORTYPE vec4\n";
 		break;
 	default: assert(!"unhandled n_channels");
 	}
@@ -475,7 +475,7 @@ static void mode_process(const char* image_path)
 	// vertex
 	"#version 460\n"
 	"\n"
-	, define_colortype_str ,
+	, define_colortype_glsl ,
 	"\n"
 	"layout (location = 0) uniform vec2 u_scale;\n"
 	"\n"
@@ -497,7 +497,7 @@ static void mode_process(const char* image_path)
 	// fragment
 	"#version 460\n"
 	"\n"
-	, define_colortype_str ,
+	, define_colortype_glsl ,
 	"\n"
 	"in COLORTYPE v_color;\n"
 	"\n"
@@ -527,11 +527,124 @@ static void mode_process(const char* image_path)
 	const GLint paint_aloc_color  = glGetAttribLocation(paint_prg, "a_color");
 
 
+
+
+	const char* hash_glsl =
+	"// A single iteration of Bob Jenkins' One-At-A-Time hashing algorithm.\n"
+	"uint jhash(uint x)\n"
+	"{\n"
+    "	x += ( x << 10u );\n"
+    "	x ^= ( x >>  6u );\n"
+    "	x += ( x <<  3u );\n"
+    "	x ^= ( x >> 11u );\n"
+    "	x += ( x << 15u );\n"
+    "	return x;\n"
+	"}\n"
+	;
+
+	const char* present_sources[] = {
+	// vertex
+	"#version 460\n"
+	"\n"
+	,
+	define_colortype_glsl
+	,
+	hash_glsl
+	,
+	"\n"
+	"layout (location = 0) uniform vec2 u_scale;\n"
+	"layout (location = 1) uniform uint u_frame;\n"
+	"\n"
+	"in vec2 a_pos;\n"
+	"in COLORTYPE a_color;\n"
+	"\n"
+	"out COLORTYPE v_color;\n"
+	"float bf(uint v)\n"
+	"{\n"
+	"	return float(v) * (1.0 / 255.0);\n"
+	"}\n"
+	"\n"
+	"float uxf(uint v, int i)\n"
+	"{\n"
+	"	if (i == 0) {\n"
+	"		return bf(v & 255u);\n"
+	"	} else if (i == 1) {\n"
+	"		return bf((v >> 8u) & 255u);\n"
+	"	} else if (i == 2) {\n"
+	"		return bf((v >> 16u) & 255u);\n"
+	"	} else if (i == 3) {\n"
+	"		return bf((v >> 24u) & 255u);\n"
+	"	} else {\n"
+	"		return 0.0;\n"
+	"	}\n"
+	"}\n"
+	"\n"
+	"float cc(float v)\n"
+	"{\n"
+	"	return (v - 0.5) * (1.0 / 255.0);\n"
+	"}\n"
+	"\n"
+	"void main()\n"
+	"{\n"
+	"	uint r0 = jhash(gl_VertexID + (u_frame << 16u));\n"
+	,
+	(
+	n_channels == 1 ?
+	"	float nois = cc(uxf(r0,0));\n"
+	: n_channels == 3 ?
+	"	vec3 nois = vec3(cc(uxf(r0,0)),cc(uxf(r0,1)),cc(uxf(r0,2)));\n"
+	: n_channels == 4 ?
+	"	vec4 nois = vec4(cc(uxf(r0,0)),cc(uxf(r0,1)),cc(uxf(r0,2)),cc(uxf(r0,3)));\n"
+	: "BANG"
+	)
+	,
+	"	v_color = a_color + nois;\n"
+	"	vec2 c = a_pos * u_scale;\n"
+	"	vec2 pos = vec2(1.0, 1.0) + c * vec2(-2.0, -2.0);\n"
+	"	gl_Position = vec4(pos, 0.0, 1.0);\n"
+	"}\n"
+
+	,
+
+	// fragment
+	"#version 460\n"
+	"\n"
+	, define_colortype_glsl ,
+	"\n"
+	"in COLORTYPE v_color;\n"
+	"\n"
+	"layout (location = 0) out vec4 frag_color;\n"
+	"\n"
+	"void main()\n"
+	"{\n"
+	,
+	(
+	n_channels == 1 ?
+	"	frag_color = vec4(v_color, v_color, v_color, 1.0);\n"
+	: n_channels == 3 ?
+	"	frag_color = vec4(v_color, 1.0);\n"
+	: n_channels == 4 ?
+	"	frag_color = v_color;\n"
+	: "BANG"
+	)
+	,
+	"}\n"
+	};
+
+	GLuint present_prg = mk_render_program(6, 5, present_sources);
+
+	const GLint present_uloc_scale = glGetUniformLocation(present_prg, "u_scale");
+	const GLint present_uloc_frame = glGetUniformLocation(present_prg, "u_frame");
+
+	const GLint present_aloc_pos    = glGetAttribLocation(present_prg, "a_pos");
+	const GLint present_aloc_color  = glGetAttribLocation(present_prg, "a_color");
+
+
 	const char* trial_sources[] = {
 	// vertex
 	"#version 460\n"
 	"\n"
-	, define_colortype_str ,
+	, define_colortype_glsl ,
 	"\n"
 	"layout (location = 0) uniform vec2 u_scale;\n"
 	"\n"
@@ -560,7 +673,7 @@ static void mode_process(const char* image_path)
 	// fragment
 	"#version 460\n"
 	"\n"
-	, define_colortype_str ,
+	, define_colortype_glsl ,
 	"\n"
 	"layout (location = 1) uniform sampler2D u_canvas_tex;\n"
 	"layout (binding = 0, offset = 0) uniform atomic_uint u_signal[\n"
@@ -636,7 +749,10 @@ static void mode_process(const char* image_path)
 	int canvas_n_weights;
 	int trial_counter;
 
+	unsigned frame_counter = 0;
+
 	while (frame()) {
+		frame_counter++;
 		if (next_primitve) {
 			trial_counter = 0;
 			next_primitve = 0;
@@ -734,9 +850,13 @@ static void mode_process(const char* image_path)
 		const int batch_size = batch_trial_index;
 
 		glBindFramebuffer(GL_FRAMEBUFFER, fb); CHKGL;
-		glViewport(0, 0, width, height);
 		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dummy_fb_tex, /*level=*/0); CHKGL;
 		assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+		glViewport(0, 0, width, height);
+		#if 0
+		glClearColor(0, 0, 0, 0);
+		glClear(GL_COLOR_BUFFER_BIT);
+		#endif
 
 		glUseProgram(trial_prg); CHKGL;
 
@@ -913,22 +1033,23 @@ static void mode_process(const char* image_path)
 		}
 
 		if (arrlen(chosen_vs) > 0) {
-			glUseProgram(paint_prg); CHKGL;
+			glUseProgram(present_prg); CHKGL;
 			glBindVertexArray(vao); CHKGL;
 			glBindBuffer(GL_ARRAY_BUFFER, paint_vbo); CHKGL;
-			glEnableVertexAttribArray(paint_aloc_pos); CHKGL;
-			glEnableVertexAttribArray(paint_aloc_color); CHKGL;
+			glEnableVertexAttribArray(present_aloc_pos); CHKGL;
+			glEnableVertexAttribArray(present_aloc_color); CHKGL;
 
-			glVertexAttribPointer(paint_aloc_pos, 2, GL_UNSIGNED_SHORT, GL_TRUE, paint_stride, (void*)0); CHKGL;
-			glVertexAttribPointer(paint_aloc_color,  n_channels, GL_UNSIGNED_SHORT, GL_TRUE,  paint_stride, (void*)4); CHKGL;
-			glUniform2f(paint_uloc_scale, 65536.0f / (float)width, 65536.0f / (float)height); CHKGL;
+			glVertexAttribPointer(present_aloc_pos, 2, GL_UNSIGNED_SHORT, GL_TRUE, paint_stride, (void*)0); CHKGL;
+			glVertexAttribPointer(present_aloc_color,  n_channels, GL_UNSIGNED_SHORT, GL_TRUE,  paint_stride, (void*)4); CHKGL;
+			glUniform2f(present_uloc_scale, 65536.0f / (float)width, 65536.0f / (float)height); CHKGL;
+			glUniform1ui(present_uloc_frame, frame_counter); CHKGL;
 
 			glBlendFunc(GL_ONE, GL_ONE); CHKGL;
 
 			glDrawArrays(GL_TRIANGLES, 0, arrlen(chosen_vs)/n_paint_elems); CHKGL;
 
-			glDisableVertexAttribArray(paint_aloc_color); CHKGL;
-			glDisableVertexAttribArray(paint_aloc_pos); CHKGL;
+			glDisableVertexAttribArray(present_aloc_color); CHKGL;
+			glDisableVertexAttribArray(present_aloc_pos); CHKGL;
 			glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
 			glBindVertexArray(0); CHKGL;
 			glUseProgram(0); CHKGL;
