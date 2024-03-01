@@ -628,7 +628,7 @@ static void mode_process(const char* image_path)
 
 	int next_primitve = 1;
 
-	uint64_t canvas_accum;
+	int64_t canvas_accum;
 	int canvas_n_weights;
 	int trial_counter;
 
@@ -657,12 +657,24 @@ static void mode_process(const char* image_path)
 			for (int y = 0; y < height; y++) {
 				for (int x = 0; x < width; x++) {
 					int s = 0;
-					for (int i = 0; i < n_channels; i++) {
-						// TODO weight RGB?
-						uint16_t v = *(p++);
-						//printf("%d\n", (int)v);
-						s += v;
+					switch (n_channels) {
+					case 1:
+						s + *(p++);
+						break;
+					case 3:
+						s += *(p++) * 2126;
+						s += *(p++) * 7152;
+						s += *(p++) * 722;
+						break;
+					case 4:
+						s += *(p++) * 2126;
+						s += *(p++) * 7152;
+						s += *(p++) * 722;
+						s += *(p++) * 10000;
+						break;
+					default: assert(!"unhandled n_channels");
 					}
+
 					if (s > 0) {
 						canvas_accum += s;
 						*(cwp++) = canvas_accum;
@@ -680,6 +692,7 @@ static void mode_process(const char* image_path)
 		const int trial_batch_size = 1 << trial_batch_size_log2;
 		for (batch_trial_index = 0; batch_trial_index < trial_batch_size && trial_counter < n_trials_per_primitive; batch_trial_index++, trial_counter++) {
 			for (int point = 0; point < 3; point++) {
+				assert(canvas_accum > 0);
 				uint64_t find = xoshiro256_next(&rng) % canvas_accum;
 
 				int left = 0;
