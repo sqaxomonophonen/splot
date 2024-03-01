@@ -355,7 +355,8 @@ static void mode_process(const char* image_path)
 
 	const int trial_batch_size_log2 = 5;
 
-	const int n_trials_per_primitive = 320; // TODO configurable?
+	//const int n_trials_per_primitive = 1280; // TODO configurable?
+	const int n_trials_per_primitive = 128; // TODO configurable?
 	const int n_trial_elems = 3 + n_channels;
 	const int trial_stride = sizeof(uint16_t) * n_trial_elems;
 
@@ -374,7 +375,7 @@ static void mode_process(const char* image_path)
 	GLuint paint_vbo;
 	glGenBuffers(1, &paint_vbo); CHKGL;
 	glBindBuffer(GL_ARRAY_BUFFER, paint_vbo); CHKGL;
-	const size_t paint_vbo_sz = 1<<14;
+	const size_t paint_vbo_sz = 1<<20;
 	glBufferData(GL_ARRAY_BUFFER, paint_vbo_sz, NULL, GL_DYNAMIC_DRAW); CHKGL;
 	glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
 
@@ -421,7 +422,7 @@ static void mode_process(const char* image_path)
 	"{\n"
 	"	v_color = a_color;\n"
 	"	vec2 c = a_pos * u_scale;\n"
-	"	vec2 pos = vec2(-1.0,  1.0) + c * vec2(2.0, -2.0);\n"
+	"	vec2 pos = vec2(-1.0, -1.0) + c * vec2(2.0,  2.0);\n"
 	"	gl_Position = vec4(pos, 0.0, 1.0);\n"
 	"}\n"
 
@@ -484,7 +485,7 @@ static void mode_process(const char* image_path)
 	"	v_color = a_color;\n"
 	"	v_signal_arrindex = uint(a_signal) >> 5u;\n"
 	"	v_signal_mask = 1u << (uint(a_signal) & 31u);\n"
-	"	vec2 pos = vec2(-1.0,  1.0) + c * vec2(2.0, -2.0);\n"
+	"	vec2 pos = vec2(-1.0, -1.0) + c * vec2(2.0,  2.0);\n"
 	"	gl_Position = vec4(pos, 0.0, 1.0);\n"
 	"}\n"
 
@@ -645,7 +646,7 @@ static void mode_process(const char* image_path)
 					*(v++) = py;
 					*(v++) = batch_trial_index;
 					for (int i = 0; i < n_channels; i++) {
-						*(v++) = pixel[i] >> 1;
+						*(v++) = pixel[i] >> 2;
 					}
 					assert((v-v0) == n_trial_elems);
 				}
@@ -691,7 +692,7 @@ static void mode_process(const char* image_path)
 		glUniform2f(trial_uloc_scale, 65536.0f / (float)width, 65536.0f / (float)height); CHKGL;
 		glUniform1i(trial_uloc_canvas_tex, 0); CHKGL;
 
-		printf("%d\n", batch_size);
+		//printf("%d\n", batch_size);
 		glDrawArrays(GL_TRIANGLES, 0, 3*batch_size); CHKGL;
 
 		{
@@ -702,15 +703,15 @@ static void mode_process(const char* image_path)
 
 			{
 				int i1 = 0;
-				printf("trials=[");
+				//printf("trials=[");
 				for (int i0 = 0; i0 < ((batch_size+31)>>5); i0++) {
 					for (; i1 < ((i0<<5)+32) && i1 < batch_size; i1++) {
 						const int underflow = a[i0] & (1 << (i1&31));
 						//printf("u_signal[%d]=%u\n", i0, a[i0]);
-						printf("%c", underflow ? '1' : '0');
+						//printf("%c", underflow ? '1' : '0');
 					}
 				}
-				printf("]\n");
+				//printf("]\n");
 			}
 
 			{
@@ -741,7 +742,7 @@ static void mode_process(const char* image_path)
 						const double score = (double)area2 * (double)color_weight;
 						if (score > best_score) {
 							best_score = score;
-							printf("new best %f\n", score);
+							//printf("new best %f\n", score);
 							uint16_t* src = &vs[3*n_trial_elems*i1];
 							uint16_t* dst = best_triangle;
 							for (int i = 0; i < 3; i++) {
@@ -777,6 +778,7 @@ static void mode_process(const char* image_path)
 
 		if (trial_counter == n_trials_per_primitive) {
 			uint16_t* vout = arraddnptr(chosen_vs, 3*n_paint_elems);
+			printf("new chosen length: %zd\n", arrlen(chosen_vs)/(3*n_paint_elems));
 			memcpy(vout, best_triangle, sizeof best_triangle);
 			next_primitve = 1;
 
@@ -813,7 +815,6 @@ static void mode_process(const char* image_path)
 			glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
 			glBindVertexArray(0); CHKGL;
 			glUseProgram(0); CHKGL;
-
 
 			glBindFramebuffer(GL_FRAMEBUFFER, 0); CHKGL;
 			glViewport(0, 0, g.width, g.height);
