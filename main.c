@@ -77,6 +77,10 @@ static inline double triangle_fatness(struct triangle t)
 	return triangle_inradius(t) / triangle_circumradius(t);
 }
 
+#define RED10K   (2126)
+#define GREEN10K (7152)
+#define BLUE10K  (722)
+#define ALPHA10K (10000)
 
 static inline const char* gl_err_string(GLenum err)
 {
@@ -662,15 +666,15 @@ static void mode_process(const char* image_path)
 						s + *(p++);
 						break;
 					case 3:
-						s += *(p++) * 2126;
-						s += *(p++) * 7152;
-						s += *(p++) * 722;
+						s += *(p++) * RED10K;
+						s += *(p++) * GREEN10K;
+						s += *(p++) * BLUE10K;
 						break;
 					case 4:
-						s += *(p++) * 2126;
-						s += *(p++) * 7152;
-						s += *(p++) * 722;
-						s += *(p++) * 10000;
+						s += *(p++) * RED10K;
+						s += *(p++) * GREEN10K;
+						s += *(p++) * BLUE10K;
+						s += *(p++) * ALPHA10K;
 						break;
 					default: assert(!"unhandled n_channels");
 					}
@@ -801,9 +805,23 @@ static void mode_process(const char* image_path)
 						for (int i2 = 0; i2 < 3; i2++) {
 							assert(v1[2] == i1);
 							v1 += n_trial_elems;
-							for (int i3 = 0; i3 < n_channels; i3++) {
-								// TODO gray scale weight?
-								color_weight += v1[3+i3];
+							uint16_t* vp = &v1[3];
+							switch (n_channels) {
+							case 1:
+								color_weight += *(vp++);
+								break;
+							case 3:
+								color_weight += *(vp++) * RED10K;
+								color_weight += *(vp++) * GREEN10K;
+								color_weight += *(vp++) * BLUE10K;
+								break;
+							case 4:
+								color_weight += *(vp++) * RED10K;
+								color_weight += *(vp++) * GREEN10K;
+								color_weight += *(vp++) * BLUE10K;
+								color_weight += *(vp++) * ALPHA10K;
+								break;
+							default: assert(!"unhandled n_channels");
 							}
 						}
 
