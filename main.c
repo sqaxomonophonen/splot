@@ -48,7 +48,7 @@ static inline double vec2_distance(struct vec2 a, struct vec2 b)
 
 static inline double triangle_area(struct triangle t)
 {
-	return 0.5 * t.A.x*(t.B.y-t.C.y) + t.B.x*(t.C.y-t.A.y) + t.C.x*(t.A.y-t.B.y);
+	return 0.5 * (t.A.x*(t.B.y-t.C.y) + t.B.x*(t.C.y-t.A.y) + t.C.x*(t.A.y-t.B.y));
 }
 
 static inline double triangle_semiperimeter(struct triangle t)
