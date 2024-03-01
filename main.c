@@ -72,9 +72,8 @@ static inline double triangle_circumradius(struct triangle t)
 	return (a*b*c) / (4.0 * triangle_area(t));
 }
 
-static inline double triangle_score(struct triangle t)
+static inline double triangle_fatness(struct triangle t)
 {
-	//return triangle_circumradius(t) / triangle_inradius(t);
 	return triangle_inradius(t) / triangle_circumradius(t);
 }
 
@@ -785,7 +784,7 @@ static void mode_process(const char* image_path)
 						uint16_t* v0 = &vs[3*n_trial_elems*i1];
 						//printf("%d\n", i1);
 						uint16_t* v1 = v0;
-						int color_weight = 0;
+						int64_t color_weight = 0;
 						for (int i2 = 0; i2 < 3; i2++) {
 							assert(v1[2] == i1);
 							v1 += n_trial_elems;
@@ -799,8 +798,7 @@ static void mode_process(const char* image_path)
 							v0[0*n_trial_elems+0], v0[0*n_trial_elems+1],
 							v0[1*n_trial_elems+0], v0[1*n_trial_elems+1],
 							v0[2*n_trial_elems+0], v0[2*n_trial_elems+1]);
-						const double area = triangle_area(T);
-						const double score = triangle_score(T);
+						const double score = triangle_fatness(T) * triangle_area(T) * (double)color_weight;
 
 						if (score > best_score) {
 							best_score = score;
