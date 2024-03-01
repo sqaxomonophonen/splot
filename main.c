@@ -9,31 +9,75 @@
 #include <SDL.h>
 #include "xoshiro256plusplus.h"
 
+struct vec2 { double x,y; };
+struct triangle { struct vec2 A,B,C; };
 
-static inline double dotunit(double x1, double y1, double x2, double y2, double x3, double y3)
+static inline struct vec2 mk_vec2(double x, double y)
 {
-	double ax = x2-x1;
-	double ay = y2-y1;
-	double al = sqrt(ax*ax+ay*ay);
-	ax /= al;
-	ay /= al;
-
-	double bx = x3-x1;
-	double by = y3-y1;
-	double bl = sqrt(bx*bx+by*by);
-	bx /= bl;
-	by /= bl;
-
-	double dot = ax*bx + ay*by;
-	if (dot < 0.0) dot = -dot;
-	return dot;
+	return (struct vec2) {.x=x, .y=y};
 }
 
-static inline int triangle_area2(int x1, int y1, int x2, int y2, int x3, int y3)
+static inline struct triangle mk_triangle(double x1, double y1, double x2, double y2, double x3, double y3)
 {
-	const int area = x1*(y2-y3) + x2*(y3-y1) + x3*(y1-y2);
-	return area >= 0 ? area : -area;
+	return (struct triangle) {
+		.A = mk_vec2(x1,y1),
+		.B = mk_vec2(x2,y2),
+		.C = mk_vec2(x3,y3),
+	};
 }
+
+static inline double vec2_dot(struct vec2 a, struct vec2 b)
+{
+	return a.x*b.x + a.y*b.y;
+}
+
+static inline double vec2_length(struct vec2 v)
+{
+	return sqrt(vec2_dot(v,v));
+}
+
+static inline struct vec2 vec2_sub(struct vec2 a, struct vec2 b)
+{
+	return (struct vec2) { .x=a.x-b.x, .y=a.y-b.y };
+}
+
+static inline double vec2_distance(struct vec2 a, struct vec2 b)
+{
+	return vec2_length(vec2_sub(b, a));
+}
+
+static inline double triangle_area(struct triangle t)
+{
+	return 0.5 * t.A.x*(t.B.y-t.C.y) + t.B.x*(t.C.y-t.A.y) + t.C.x*(t.A.y-t.B.y);
+}
+
+static inline double triangle_semiperimeter(struct triangle t)
+{
+	const double a = vec2_distance(t.A, t.B);
+	const double b = vec2_distance(t.B, t.C);
+	const double c = vec2_distance(t.C, t.A);
+	return (a+b+c)/2.0;
+}
+
+static inline double triangle_inradius(struct triangle t)
+{
+	return triangle_area(t) / triangle_semiperimeter(t);
+}
+
+static inline double triangle_circumradius(struct triangle t)
+{
+	const double a = vec2_distance(t.A, t.B);
+	const double b = vec2_distance(t.B, t.C);
+	const double c = vec2_distance(t.C, t.A);
+	return (a*b*c) / (4.0 * triangle_area(t));
+}
+
+static inline double triangle_score(struct triangle t)
+{
+	//return triangle_circumradius(t) / triangle_inradius(t);
+	return triangle_inradius(t) / triangle_circumradius(t);
+}
+
 
 static inline const char* gl_err_string(GLenum err)
 {
@@ -373,10 +417,9 @@ static void mode_process(const char* image_path)
 
 	glBindTexture(GL_TEXTURE_2D, 0); CHKGL;
 
-	const int trial_batch_size_log2 = 13;
+	const int trial_batch_size_log2 = 10;
 
-	//const int n_trials_per_primitive = 1280; // TODO configurable?
-	const int n_trials_per_primitive = 1<<13; // TODO configurable?
+	const int n_trials_per_primitive = 1<<10; // TODO configurable?
 	const int n_trial_elems = 3 + n_channels;
 	const int trial_stride = sizeof(uint16_t) * n_trial_elems;
 
@@ -752,31 +795,12 @@ static void mode_process(const char* image_path)
 							}
 						}
 
-						const int area2 = triangle_area2(
+						struct triangle T = mk_triangle(
 							v0[0*n_trial_elems+0], v0[0*n_trial_elems+1],
 							v0[1*n_trial_elems+0], v0[1*n_trial_elems+1],
-							v0[2*n_trial_elems+0], v0[2*n_trial_elems+1]
-						);
-
-						double a0 = dotunit(
-							v0[0*n_trial_elems+0], v0[0*n_trial_elems+1],
-							v0[1*n_trial_elems+0], v0[1*n_trial_elems+1],
-							v0[2*n_trial_elems+0], v0[2*n_trial_elems+1]
-						);
-						double a1 = dotunit(
-							v0[1*n_trial_elems+0], v0[1*n_trial_elems+1],
-							v0[2*n_trial_elems+0], v0[2*n_trial_elems+1],
-							v0[0*n_trial_elems+0], v0[0*n_trial_elems+1]
-						);
-						double a2 = dotunit(
-							v0[2*n_trial_elems+0], v0[2*n_trial_elems+1],
-							v0[0*n_trial_elems+0], v0[0*n_trial_elems+1],
-							v0[1*n_trial_elems+0], v0[1*n_trial_elems+1]
-						);
-
-						double ax = (a0 < a1 ? a0 : a1);
-						ax = ax < a2 ? ax : a2;
-						const double score = (double)area2 * (double)color_weight * ax;
+							v0[2*n_trial_elems+0], v0[2*n_trial_elems+1]);
+						const double area = triangle_area(T);
+						const double score = triangle_score(T);
 
 						if (score > best_score) {
 							best_score = score;
