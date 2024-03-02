@@ -392,7 +392,9 @@ static void mode_process(const char* image_path)
 	}
 	printf("%d×%dc%d\n", width, height, n_channels);
 
-	uint16_t* canvas_image = malloc(width*height*n_channels*sizeof(*canvas_image ));
+	const size_t canvas_image_sz = width*height*n_channels*sizeof(uint16_t);
+	uint16_t* canvas_image = malloc(canvas_image_sz);
+	memset(canvas_image, -1, canvas_image_sz);
 	uint64_t* canvas_cum_weight = malloc(width*height*sizeof(*canvas_cum_weight));
 	int* canvas_cum_idx = malloc(width*height*sizeof(*canvas_cum_idx));
 
@@ -429,7 +431,9 @@ static void mode_process(const char* image_path)
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); CHKGL;
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST); CHKGL;
 		assert((((width*pixel_size) & 3) == 0) && "FIXME unaligned rows; use glPixelStorei(GL_UNPACK_ALIGNMENT, 1)?");
-		glTexImage2D(GL_TEXTURE_2D, /*level=*/0, internal_format, width, height, /*border=*/0, format, GL_UNSIGNED_SHORT, source_image); CHKGL;
+		//const GLvoid* data = tex == 0 ? canvas_image : tex == 1 ? source_image : NULL;
+		const GLvoid* data = source_image;
+		glTexImage2D(GL_TEXTURE_2D, /*level=*/0, internal_format, width, height, /*border=*/0, format, GL_UNSIGNED_SHORT, data); CHKGL;
 		glBindTexture(GL_TEXTURE_2D, 0); CHKGL;
 	}
 
@@ -839,6 +843,7 @@ static void mode_process(const char* image_path)
 				assert(tw == width);
 				assert(th == height);
 			}
+			//memset(canvas_image, 0, canvas_image_sz);
 			glGetTexImage(GL_TEXTURE_2D, 0, format, GL_UNSIGNED_SHORT, canvas_image);
 			glBindTexture(GL_TEXTURE_2D, 0); CHKGL;
 
@@ -877,6 +882,7 @@ static void mode_process(const char* image_path)
 				}
 			}
 			canvas_n_weights = cwp - canvas_cum_weight;
+			assert(canvas_n_weights == (cip - canvas_cum_idx));
 		}
 
 		arrsetlen(vs, 0);
@@ -884,8 +890,10 @@ static void mode_process(const char* image_path)
 		int batch_trial_index = 0;
 		const int trial_batch_size = 1 << trial_batch_size_log2;
 		for (batch_trial_index = 0; batch_trial_index < trial_batch_size && trial_counter < n_trials_per_primitive; batch_trial_index++, trial_counter++) {
+			const uint64_t rn0 = xoshiro256_next(&rng);
 			for (int point = 0; point < 3; point++) {
 				assert(canvas_accum > 0);
+				#if 1
 				uint64_t find = xoshiro256_next(&rng) % canvas_accum;
 
 				int left = 0;
@@ -905,7 +913,14 @@ static void mode_process(const char* image_path)
 				const int idx = canvas_cum_idx[right-1];
 				const int px = idx % width;
 				const int py = idx / width;
-				uint16_t* pixel = &canvas_image[idx*n_channels];
+				#else
+				uint64_t r0 = xoshiro256_next(&rng) % canvas_accum;
+				const int px = r0 % width;
+				const int py = (r0>>16) % height;
+				const int idx = px + py * width;
+				#endif
+				uint16_t* canvas_pixel = &canvas_image[idx*n_channels];
+				uint16_t* src_pixel = &source_image[idx*n_channels];
 
 				{
 					uint16_t* v0 = arraddnptr(vs, 3+n_channels);
@@ -914,7 +929,11 @@ static void mode_process(const char* image_path)
 					*(v++) = py;
 					*(v++) = batch_trial_index;
 					for (int i = 0; i < n_channels; i++) {
-						*(v++) = pixel[i] >> 4;
+						int p = src_pixel[i] >> 4;
+						int cp = canvas_pixel[i]-1;
+						if (p > cp) p = cp;
+						*(v++) = p;
+						//*(v++) = ((uint64_t)src_pixel[i] * (rn0 & 0xffff)) >> 19;
 					}
 					assert((v-v0) == n_trial_elems);
 				}
@@ -995,24 +1014,35 @@ static void mode_process(const char* image_path)
 						//printf("%d\n", i1);
 						uint16_t* v1 = v0;
 						int64_t color_weight = 0;
-						for (int i2 = 0; i2 < 3; i2++) {
+						for (int i2 = 0; i2 < 3; i2++, v1 += n_trial_elems) {
 							assert(v1[2] == i1);
-							v1 += n_trial_elems;
-							uint16_t* vp = &v1[3];
+							uint16_t* vp0 = &canvas_image[(v1[0] + v1[1] * width) * n_channels];
+							uint16_t* vp1 = &v1[3];
+							const int w0 = 5;
+							const int w1 = 1;
+
 							switch (n_channels) {
 							case 1:
-								color_weight += *(vp++);
+								color_weight += *(vp0++) * w0;
+								color_weight += *(vp1++) * w1;
 								break;
 							case 3:
-								color_weight += *(vp++) * RED10K;
-								color_weight += *(vp++) * GREEN10K;
-								color_weight += *(vp++) * BLUE10K;
+								color_weight += *(vp0++) * RED10K * w0;
+								color_weight += *(vp0++) * GREEN10K * w0;
+								color_weight += *(vp0++) * BLUE10K * w0;
+								color_weight += *(vp1++) * RED10K * w1;
+								color_weight += *(vp1++) * GREEN10K * w1;
+								color_weight += *(vp1++) * BLUE10K * w1;
 								break;
 							case 4:
-								color_weight += *(vp++) * RED10K;
-								color_weight += *(vp++) * GREEN10K;
-								color_weight += *(vp++) * BLUE10K;
-								color_weight += *(vp++) * ALPHA10K;
+								color_weight += *(vp0++) * RED10K * w0;
+								color_weight += *(vp0++) * GREEN10K * w0;
+								color_weight += *(vp0++) * BLUE10K * w0;
+								color_weight += *(vp0++) * ALPHA10K * w0;
+								color_weight += *(vp1++) * RED10K * w1;
+								color_weight += *(vp1++) * GREEN10K * w1;
+								color_weight += *(vp1++) * BLUE10K * w1;
+								color_weight += *(vp1++) * ALPHA10K * w1;
 								break;
 							default: assert(!"unhandled n_channels");
 							}
@@ -1022,7 +1052,10 @@ static void mode_process(const char* image_path)
 							v0[0*n_trial_elems+0], v0[0*n_trial_elems+1],
 							v0[1*n_trial_elems+0], v0[1*n_trial_elems+1],
 							v0[2*n_trial_elems+0], v0[2*n_trial_elems+1]);
-						const double score = triangle_fatness(T) * triangle_area(T) * (double)color_weight;
+						const double score = (0.2 + triangle_fatness(T)) * triangle_area(T) * (double)color_weight;
+						//const double score = triangle_fatness(T) * (double)color_weight;
+						//const double score = triangle_fatness(T);
+						//const double score = triangle_area(T);
 
 						if (score > best_score) {
 							best_score = score;
@@ -1038,7 +1071,6 @@ static void mode_process(const char* image_path)
 								}
 							}
 						}
-
 					}
 				}
 			}
