@@ -17,15 +17,6 @@ static inline struct vec2 mk_vec2(double x, double y)
 	return (struct vec2) {.x=x, .y=y};
 }
 
-static inline struct triangle mk_triangle(double x1, double y1, double x2, double y2, double x3, double y3)
-{
-	return (struct triangle) {
-		.A = mk_vec2(x1,y1),
-		.B = mk_vec2(x2,y2),
-		.C = mk_vec2(x3,y3),
-	};
-}
-
 static inline double vec2_dot(struct vec2 a, struct vec2 b)
 {
 	return a.x*b.x + a.y*b.y;
@@ -49,6 +40,17 @@ static inline double vec2_distance(struct vec2 a, struct vec2 b)
 static inline double triangle_area(struct triangle t)
 {
 	return 0.5 * (t.A.x*(t.B.y-t.C.y) + t.B.x*(t.C.y-t.A.y) + t.C.x*(t.A.y-t.B.y));
+}
+
+static inline struct triangle mk_triangle(double x1, double y1, double x2, double y2, double x3, double y3)
+{
+	struct triangle t = {
+		.A = mk_vec2(x1,y1),
+		.B = mk_vec2(x2,y2),
+		.C = mk_vec2(x3,y3),
+	};
+	//printf("%f,%f - %f,%f - %f,%f   area=%f\n", x1,y1, x2,y2, x3,y3, triangle_area(t));
+	return t;
 }
 
 static inline double triangle_semiperimeter(struct triangle t)
@@ -111,6 +113,7 @@ static inline void _chkgl(const char* file, int line)
 
 static struct {
 	SDL_Window* window;
+	SDL_GLContext glctx;
 	int width;
 	int height;
 	GLint max_fragment_atomic_counters;
@@ -305,7 +308,7 @@ static void init(void)
 		1920, 1080,
 		SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
 	assert(g.window != NULL);
-	SDL_GLContext glctx = SDL_GL_CreateContext(g.window);
+	g.glctx = SDL_GL_CreateContext(g.window);
 
 	SDL_GL_SetSwapInterval(1);
 
@@ -344,7 +347,7 @@ static int frame(void)
 			switch (ev.type) {
 			case SDL_KEYDOWN: {
 				int sym = ev.key.keysym.sym;
-				int mod = ev.key.keysym.mod;
+				//int mod = ev.key.keysym.mod;
 				if (sym == SDLK_ESCAPE) return 0;
 				if (sym == '1') mode = MODE_POSITIVE;
 				if (sym == '2') mode = MODE_NEGATIVE;
@@ -449,9 +452,9 @@ static void mode_process(const char* image_path)
 
 	glBindTexture(GL_TEXTURE_2D, 0); CHKGL;
 
-	const int trial_batch_size_log2 = 11;
+	const int trial_batch_size_log2 = 9;
 
-	const int n_trials_per_primitive = 1<<11; // TODO configurable?
+	const int n_trials_per_primitive = 1<<9; // TODO configurable?
 	const int n_trial_elems = 3 + n_channels;
 	const int trial_stride = sizeof(uint16_t) * n_trial_elems;
 
@@ -817,7 +820,9 @@ static void mode_process(const char* image_path)
 	glEnable(GL_BLEND); CHKGL;
 
 	double best_score;
-	uint16_t best_triangle[3*n_paint_elems];
+	struct triangle best_triangle;
+	double best_color_weight;
+	uint16_t best_triangle_elems[3*n_paint_elems];
 	uint16_t* chosen_vs = NULL;
 
 	int next_primitve = 1;
@@ -847,6 +852,21 @@ static void mode_process(const char* image_path)
 			glGetTexImage(GL_TEXTURE_2D, 0, format, GL_UNSIGNED_SHORT, canvas_image);
 			glBindTexture(GL_TEXTURE_2D, 0); CHKGL;
 
+			#if 0
+			{
+
+				uint16_t* p = canvas_image;
+				for (int y = 0; y < height; y++) {
+					for (int x = 0; x < width; x++) {
+						for (int c = 0; c < n_channels; c++) {
+							printf("%d ", (int)*(p++));
+						}
+						printf("\n");
+					}
+				}
+			}
+			#endif
+
 			uint16_t* p = canvas_image;
 			canvas_accum = 0;
 			uint64_t* cwp = canvas_cum_weight;
@@ -857,7 +877,7 @@ static void mode_process(const char* image_path)
 					int s = 0;
 					switch (n_channels) {
 					case 1:
-						s + *(p++);
+						s += *(p++);
 						break;
 					case 3:
 						s += *(p++) * RED10K;
@@ -873,6 +893,7 @@ static void mode_process(const char* image_path)
 					default: assert(!"unhandled n_channels");
 					}
 
+					//printf("s=%d\n", s);
 					if (s > 0) {
 						canvas_accum += s;
 						*(cwp++) = canvas_accum;
@@ -890,7 +911,6 @@ static void mode_process(const char* image_path)
 		int batch_trial_index = 0;
 		const int trial_batch_size = 1 << trial_batch_size_log2;
 		for (batch_trial_index = 0; batch_trial_index < trial_batch_size && trial_counter < n_trials_per_primitive; batch_trial_index++, trial_counter++) {
-			const uint64_t rn0 = xoshiro256_next(&rng);
 			for (int point = 0; point < 3; point++) {
 				assert(canvas_accum > 0);
 				#if 1
@@ -931,8 +951,11 @@ static void mode_process(const char* image_path)
 					for (int i = 0; i < n_channels; i++) {
 						int p = src_pixel[i] >> 4;
 						int cp = canvas_pixel[i]-1;
+						if (cp < 0) cp = 0;
+						//printf("p=%d v cp=%d\n", p, cp);
 						if (p > cp) p = cp;
 						*(v++) = p;
+						//const uint64_t rn0 = xoshiro256_next(&rng);
 						//*(v++) = ((uint64_t)src_pixel[i] * (rn0 & 0xffff)) >> 19;
 					}
 					assert((v-v0) == n_trial_elems);
@@ -983,85 +1006,140 @@ static void mode_process(const char* image_path)
 		glUniform1i(trial_uloc_canvas_tex, 0); CHKGL;
 
 		//printf("%d\n", batch_size);
+		//printf("TRIAL SIZE %d\n", batch_size);
 		glDrawArrays(GL_TRIANGLES, 0, 3*batch_size); CHKGL;
 
 		{
-			GLuint* a = glMapBufferRange(
+			GLuint* atomics = glMapBufferRange(
 				GL_ATOMIC_COUNTER_BUFFER,
 				0, atomic_buffer_sz,
 				GL_MAP_READ_BIT);
 
+			#if 0
 			{
 				int i1 = 0;
-				//printf("trials=[");
+				printf("trials=[");
 				for (int i0 = 0; i0 < ((batch_size+31)>>5); i0++) {
 					for (; i1 < ((i0<<5)+32) && i1 < batch_size; i1++) {
-						const int underflow = a[i0] & (1 << (i1&31));
-						//printf("u_signal[%d]=%u\n", i0, a[i0]);
-						//printf("%c", underflow ? '1' : '0');
+						const int underflow = atomics[i0] & (1 << (i1&31));
+						//printf("u_signal[%d]=%u\n", i0, atomics[i0]);
+						printf("%c", underflow ? '1' : '0');
 					}
 				}
-				//printf("]\n");
+				printf("]\n");
 			}
+			#endif
 
 			{
 				int i1 = 0;
 				for (int i0 = 0; i0 < ((batch_size+31)>>5); i0++) {
 					for (; i1 < ((i0<<5)+32) && i1 < batch_size; i1++) {
-						const int underflow = a[i0] & (1 << (i1&31));
-						if (underflow) continue;
+						const int underflow = atomics[i0] & (1 << (i1&31));
+						if (underflow) {
+							#if 0
+							printf("U\n");
+							#endif
+							continue;
+						}
 						uint16_t* v0 = &vs[3*n_trial_elems*i1];
 						//printf("%d\n", i1);
 						uint16_t* v1 = v0;
-						int64_t color_weight = 0;
+						int64_t color_accum = 0;
+						double accum_scale;
 						for (int i2 = 0; i2 < 3; i2++, v1 += n_trial_elems) {
 							assert(v1[2] == i1);
 							uint16_t* vp0 = &canvas_image[(v1[0] + v1[1] * width) * n_channels];
 							uint16_t* vp1 = &v1[3];
-							const int w0 = 5;
-							const int w1 = 1;
+							const int64_t w0 = 5;
+							const int64_t w1 = 1;
 
 							switch (n_channels) {
 							case 1:
-								color_weight += *(vp0++) * w0;
-								color_weight += *(vp1++) * w1;
+								color_accum += *(vp0++) * w0;
+								color_accum += *(vp1++) * w1;
+								accum_scale = 1.0 / (2.0 * 65536.0);
 								break;
 							case 3:
-								color_weight += *(vp0++) * RED10K * w0;
-								color_weight += *(vp0++) * GREEN10K * w0;
-								color_weight += *(vp0++) * BLUE10K * w0;
-								color_weight += *(vp1++) * RED10K * w1;
-								color_weight += *(vp1++) * GREEN10K * w1;
-								color_weight += *(vp1++) * BLUE10K * w1;
+								#if 0
+								printf("acc=%ld\n",color_accum);
+								#endif
+								color_accum += *(vp0++) * RED10K * w0;
+								color_accum += *(vp0++) * GREEN10K * w0;
+								color_accum += *(vp0++) * BLUE10K * w0;
+								color_accum += *(vp1++) * RED10K * w1;
+								color_accum += *(vp1++) * GREEN10K * w1;
+								color_accum += *(vp1++) * BLUE10K * w1;
+								#if 0
+								printf("%d %d %d   %d %d %d   => acc=%ld\n",
+									vp0[0],
+									vp0[1],
+									vp0[2],
+									vp1[0],
+									vp1[1],
+									vp1[2],
+									color_accum);
+								assert(!"XXX");
+								#endif
+								accum_scale = 1.0 / ((double)(w0+w1) * 20000.0 * 65536.0);
 								break;
 							case 4:
-								color_weight += *(vp0++) * RED10K * w0;
-								color_weight += *(vp0++) * GREEN10K * w0;
-								color_weight += *(vp0++) * BLUE10K * w0;
-								color_weight += *(vp0++) * ALPHA10K * w0;
-								color_weight += *(vp1++) * RED10K * w1;
-								color_weight += *(vp1++) * GREEN10K * w1;
-								color_weight += *(vp1++) * BLUE10K * w1;
-								color_weight += *(vp1++) * ALPHA10K * w1;
+								color_accum += *(vp0++) * RED10K * w0;
+								color_accum += *(vp0++) * GREEN10K * w0;
+								color_accum += *(vp0++) * BLUE10K * w0;
+								color_accum += *(vp0++) * ALPHA10K * w0;
+								color_accum += *(vp1++) * RED10K * w1;
+								color_accum += *(vp1++) * GREEN10K * w1;
+								color_accum += *(vp1++) * BLUE10K * w1;
+								color_accum += *(vp1++) * ALPHA10K * w1;
+								accum_scale = 1.0 / ((double)(w0+w1) * 40000.0 * 65536.0);
 								break;
 							default: assert(!"unhandled n_channels");
 							}
 						}
+						const double color_weight = (double)color_accum * accum_scale;
+						#if 0
+						printf("accum=%ld, scale=%f => weight=%f\n", color_accum , accum_scale,color_weight);
+						#endif
 
-						struct triangle T = mk_triangle(
+						const struct triangle T = mk_triangle(
 							v0[0*n_trial_elems+0], v0[0*n_trial_elems+1],
 							v0[1*n_trial_elems+0], v0[1*n_trial_elems+1],
 							v0[2*n_trial_elems+0], v0[2*n_trial_elems+1]);
-						const double score = (0.2 + triangle_fatness(T)) * triangle_area(T) * (double)color_weight;
+						//const double score = (0.2 + triangle_fatness(T)) * triangle_area(T) * (double)color_weight;
 						//const double score = triangle_fatness(T) * (double)color_weight;
+
+						const double area = fabs(triangle_area(T));
+						if (area < 10.0) {
+							#if 0
+							printf("A %f\n", triangle_area(T));
+							#endif
+							continue;
+						}
+						const double fat = triangle_fatness(T);
+						if (fat < 0.01) {
+							#if 0
+							printf("F %f\n", fat);
+							#endif
+							continue;
+						}
+						const double area_ratio = area / (double)(width*height);
+						const double area_score = pow(area_ratio, 0.01);
+						//printf("AR=%f\n", area_ratio);
+						//const double score = (0.2 + triangle_fatness(T)) * (double)color_weight;
+						const double score = (0.2 + fat) * color_weight * area_score;
 						//const double score = triangle_fatness(T);
 						//const double score = triangle_area(T);
 
+						#if 0
+						printf("OK score=%f fat=%f cw=%f area=%f?\n", score, fat, color_weight, area_score);
+						#endif
 						if (score > best_score) {
 							best_score = score;
+							best_triangle = T;
+							best_color_weight = (double)color_weight;
 							//printf("new best %f\n", score);
 							uint16_t* src = &vs[3*n_trial_elems*i1];
-							uint16_t* dst = best_triangle;
+							uint16_t* dst = best_triangle_elems;
 							for (int i = 0; i < 3; i++) {
 								*(dst++) = *(src++);
 								*(dst++) = *(src++);
@@ -1096,8 +1174,15 @@ static void mode_process(const char* image_path)
 			next_primitve = 1;
 			if (best_score > 0) {
 				uint16_t* vout = arraddnptr(chosen_vs, 3*n_paint_elems);
-				memcpy(vout, best_triangle, sizeof best_triangle);
-				printf("new chosen length: %zd\n", arrlen(chosen_vs)/(3*n_paint_elems));
+				memcpy(vout, best_triangle_elems, sizeof best_triangle_elems);
+				printf("chose triangle %zd: area=%.0f; fat=%.3f; cw=%.6f\n",
+					arrlen(chosen_vs)/(3*n_paint_elems),
+					fabs(triangle_area(best_triangle)),
+					triangle_fatness(best_triangle),
+					best_color_weight
+				);
+
+					
 				glBindBuffer(GL_ARRAY_BUFFER, paint_vbo); CHKGL;
 				const size_t blitsz = sizeof(chosen_vs[0]) * arrlen(chosen_vs);
 				assert(blitsz <= paint_vbo_sz);
