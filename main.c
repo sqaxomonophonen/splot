@@ -53,11 +53,16 @@ static inline struct triangle mk_triangle(double x1, double y1, double x2, doubl
 	return t;
 }
 
+static inline void triangle_sides(struct triangle t, double* a, double* b, double* c){
+	*a = vec2_distance(t.A, t.B);
+	*b = vec2_distance(t.B, t.C);
+	*c = vec2_distance(t.C, t.A);
+}
+
 static inline double triangle_semiperimeter(struct triangle t)
 {
-	const double a = vec2_distance(t.A, t.B);
-	const double b = vec2_distance(t.B, t.C);
-	const double c = vec2_distance(t.C, t.A);
+	double a,b,c;
+	triangle_sides(t, &a, &b, &c);
 	return (a+b+c)/2.0;
 }
 
@@ -68,9 +73,8 @@ static inline double triangle_inradius(struct triangle t)
 
 static inline double triangle_circumradius(struct triangle t)
 {
-	const double a = vec2_distance(t.A, t.B);
-	const double b = vec2_distance(t.B, t.C);
-	const double c = vec2_distance(t.C, t.A);
+	double a,b,c;
+	triangle_sides(t, &a, &b, &c);
 	return (a*b*c) / (4.0 * triangle_area(t));
 }
 
