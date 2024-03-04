@@ -13,7 +13,7 @@ static int accept_triangle(struct triangle T)
 {
 	const double area_ratio = triangle_area(T) / source_area();
 	if (area_ratio > 1.0 / (6.0*6.0)) return 0;
-	if (triangle_fatness(T) < 0.1) return 0;
+	if (triangle_fatness(T) < 0.005) return 0;
 	return 1;
 }
 
@@ -22,11 +22,11 @@ static double score_candidate(struct triangle T, double canvas_color_weight, dou
 	const double area = fabs(triangle_area(T));
 	if (area < 10.0) return 0;
 	const double fat = triangle_fatness(T);
-	if (fat < 0.01) return 0;
 	const double area_ratio = area / source_area();
 	const double area_score = pow(area_ratio, 0.01);
-	double color_weight = 1.0*canvas_color_weight + 4.0*vertex_color_weight;
-	return (0.2 + fat) * color_weight * area_score;
+	const double color_weight = 1.0*canvas_color_weight + 4.0*vertex_color_weight;
+	const double fat_score = powf(fat, 0.5);
+	return fat_score * color_weight * area_score;
 }
 
 int main(int argc, char** argv)

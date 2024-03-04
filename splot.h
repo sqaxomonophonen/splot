@@ -95,7 +95,7 @@ static inline double triangle_circumradius(struct triangle t)
 
 static inline double triangle_fatness(struct triangle t)
 {
-	return triangle_inradius(t) / triangle_circumradius(t);
+	return 2.0 * (triangle_inradius(t) / triangle_circumradius(t));
 }
 
 #define RED10K   (2126)
@@ -130,8 +130,8 @@ static inline void _chkgl(const char* file, int line)
 
 #define CHKGL _chkgl(__FILE__, __LINE__)
 
-static const int trial_batch_size_log2 = 9; // CFG
-static const int n_trials_per_primitive = 1<<9; // CFG
+static const int trial_batch_size_log2 = 10; // CFG
+static const int n_trials_per_primitive = 1<<10; // CFG
 static const size_t paint_vbo_sz = 1<<20;
 
 static struct {
