@@ -9,9 +9,11 @@ PKGS=sdl2
 CFLAGS+=$(shell pkg-config --cflags ${PKGS})
 LDLIBS+=$(shell pkg-config --libs ${PKGS})
 
-all: main
+OBJS=gl3w.o stb_image.o stb_ds.o
 
-main: main.o gl3w.o stb_image.o stb_ds.o
+all: p0
+
+p0: p0.o $(OBJS)
 
 clean:
 	rm -f *.o main

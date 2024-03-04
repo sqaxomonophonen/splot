@@ -1,3 +1,17 @@
+#ifndef SPLOT_H
+
+struct level {
+	int w; // resolution; 0=source resolution
+	int n; // number of candidates
+	// these must be 0 in first level:
+	int r; // search radius
+	double cn; // color noise
+};
+
+struct config {
+	struct level* levels;
+};
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <assert.h>
@@ -6,8 +20,9 @@
 #include "gl3w.h"
 #include "stb_image.h"
 #include "stb_ds.h"
-#include <SDL.h>
 #include "xoshiro256plusplus.h"
+
+#include <SDL.h>
 
 struct vec2 { double x,y; };
 struct triangle { struct vec2 A,B,C; };
@@ -185,28 +200,16 @@ static struct {
 	int paint_stride;
 } g;
 
-const char* prg = NULL;
+static inline double source_area(void) { return g.source_width * g.source_height; }
 
-__attribute__((noreturn))
-static void usage(const char* msg)
+static inline uint64_t rng_next(void)
 {
-	if (msg != NULL) fprintf(stderr, "%s\n", msg);
-	fprintf(stderr, "Usage: %s <cmd> [args...]\n", prg);
-	fprintf(stderr, "  %s process </path/to/image>\n", prg);
-	fprintf(stderr, "  %s view </path/to/primlist>\n", prg);
-	fprintf(stderr, "  %s render </path/to/primlist>\n", prg);
-	exit(EXIT_FAILURE);
+	return xoshiro256_next(&g.rng);
 }
 
-
-static void usagef(const char* fmt, ...)
+static inline void rng_seed(uint64_t seed)
 {
-	va_list args;
-	va_start(args, fmt);
-	char buf[1<<14];
-	vsnprintf(buf, sizeof buf, fmt, args);
-	usage(buf);
-	va_end(args);
+	xoshiro256_seed(&g.rng, seed);
 }
 
 static void check_shader(GLuint shader, GLenum type, int n_sources, const char** sources)
@@ -443,6 +446,10 @@ static int frame(void)
 	return 1;
 }
 
+static uint16_t candidate_component(uint16_t src_pixel, uint16_t canvas_pixel);
+static int accept_triangle(struct triangle);
+static double score_candidate(struct triangle, double canvas_color_weight, double vertex_color_weight);
+
 static void process_search(void)
 {
 	if (g.next_primitve) {
@@ -505,14 +512,14 @@ static void process_search(void)
 	const int trial_batch_size = 1 << trial_batch_size_log2;
 	for (batch_trial_index = 0; batch_trial_index < trial_batch_size && g.trial_counter < n_trials_per_primitive; batch_trial_index++, g.trial_counter++) {
 		uint16_t* v0 = arraddnptr(g.vtxbuf, 3*g.n_trial_elems);
-		const int max_attempts = 50; // CFG
+		const int max_attempts = 100; // CFG?
 		for (int attempt = 0; attempt < max_attempts; attempt++) {
 			uint16_t* v = v0;
 			for (int point = 0; point < 3; point++) {
 				assert(g.canvas_accum > 0);
 				int idx, px, py;
 				if (attempt < max_attempts/2) { // CFG?
-					uint64_t find = xoshiro256_next(&g.rng) % g.canvas_accum;
+					uint64_t find = rng_next() % g.canvas_accum;
 
 					int left = 0;
 					int right = g.canvas_n_weights;
@@ -534,9 +541,9 @@ static void process_search(void)
 					px = idx % g.source_width;
 					py = idx / g.source_width;
 				} else {
-					uint64_t r0 = xoshiro256_next(&g.rng) % g.canvas_accum;
+					uint64_t r0 = rng_next() % g.canvas_accum;
 					px = r0 % g.source_width;
-					py = (r0>>16) % g.source_height;
+					py = (r0/g.source_width) % g.source_height;
 					idx = px + py * g.source_width;
 				}
 				uint16_t* canvas_pixel = &g.canvas_image[idx*g.source_n_channels];
@@ -546,26 +553,30 @@ static void process_search(void)
 				*(v++) = py;
 				*(v++) = batch_trial_index;
 				for (int i = 0; i < g.source_n_channels; i++) {
-					int p = src_pixel[i] >> 4; // CFG
-					int cp = canvas_pixel[i]-1;
-					if (cp < 0) cp = 0;
-					if (p > cp) p = cp;
-					*(v++) = p;
-					//const uint64_t rn0 = xoshiro256_next(&g.rng);
-					//*(v++) = ((uint64_t)src_pixel[i] * (rn0 & 0xffff)) >> 19;
+					*(v++) = candidate_component(src_pixel[i], canvas_pixel[i]);
 				}
 			}
 			assert((v-v0) == 3*g.n_trial_elems);
-			const struct triangle T = mk_triangle(
+			struct triangle T = mk_triangle(
 				v0[0*g.n_trial_elems+0], v0[0*g.n_trial_elems+1],
 				v0[1*g.n_trial_elems+0], v0[1*g.n_trial_elems+1],
 				v0[2*g.n_trial_elems+0], v0[2*g.n_trial_elems+1]);
-			const double area = fabs(triangle_area(T));
-			const double area_ratio = area / (double)(g.source_width*g.source_height);
-			if (area_ratio > 1.0 / (6.0*6.0)) continue; // CFG
-			const double fat = triangle_fatness(T);
-			if (fat < 0.1) continue; // CFG
-			break;
+			double signed_area = triangle_area(T);
+			if (signed_area < 0.0) {
+				uint16_t* v = v0;
+				uint16_t tmp[7];
+				const size_t sz = sizeof(tmp[0]) * g.n_trial_elems;
+				memcpy(tmp, &v0[1*g.n_trial_elems], sz);
+				memcpy(&v0[1*g.n_trial_elems], &v0[2*g.n_trial_elems], sz);
+				memcpy(&v0[2*g.n_trial_elems], tmp, sz);
+				T = mk_triangle(
+					v0[0*g.n_trial_elems+0], v0[0*g.n_trial_elems+1],
+					v0[1*g.n_trial_elems+0], v0[1*g.n_trial_elems+1],
+					v0[2*g.n_trial_elems+0], v0[2*g.n_trial_elems+1]);
+				signed_area = triangle_area(T);
+			}
+			assert(signed_area >= 0.0);
+			if (accept_triangle(T)) break;
 		}
 	}
 	const int batch_size = batch_trial_index;
@@ -627,66 +638,57 @@ static void process_search(void)
 				}
 				uint16_t* v0 = &g.vtxbuf[3*g.n_trial_elems*i1];
 				uint16_t* v1 = v0;
-				int64_t color_accum = 0;
+				int64_t canvas_color_accum = 0;
+				int64_t vertex_color_accum = 0;
 				double accum_scale;
 				for (int i2 = 0; i2 < 3; i2++, v1 += g.n_trial_elems) {
 					assert(v1[2] == i1);
 					uint16_t* vp0 = &g.canvas_image[(v1[0] + v1[1] * g.source_width) * g.source_n_channels];
 					uint16_t* vp1 = &v1[3];
-					const int64_t w0 = 5; // CFG
-					const int64_t w1 = 1; // CFG
 
 					switch (g.source_n_channels) {
 					case 1:
-						color_accum += *(vp0++) * w0;
-						color_accum += *(vp1++) * w1;
+						canvas_color_accum += *(vp0++);
+						vertex_color_accum += *(vp1++);
 						accum_scale = 1.0 / (2.0 * 65536.0);
 						break;
 					case 3:
-						color_accum += *(vp0++) * RED10K * w0;
-						color_accum += *(vp0++) * GREEN10K * w0;
-						color_accum += *(vp0++) * BLUE10K * w0;
-						color_accum += *(vp1++) * RED10K * w1;
-						color_accum += *(vp1++) * GREEN10K * w1;
-						color_accum += *(vp1++) * BLUE10K * w1;
-						accum_scale = 1.0 / ((double)(w0+w1) * 20000.0 * 65536.0);
+						canvas_color_accum += *(vp0++) * (int64_t)RED10K;
+						canvas_color_accum += *(vp0++) * (int64_t)GREEN10K;
+						canvas_color_accum += *(vp0++) * (int64_t)BLUE10K;
+						vertex_color_accum += *(vp1++) * (int64_t)RED10K;
+						vertex_color_accum += *(vp1++) * (int64_t)GREEN10K;
+						vertex_color_accum += *(vp1++) * (int64_t)BLUE10K;
+						accum_scale = 1.0 / (20000.0 * 65536.0);
 						break;
 					case 4:
-						color_accum += *(vp0++) * RED10K * w0;
-						color_accum += *(vp0++) * GREEN10K * w0;
-						color_accum += *(vp0++) * BLUE10K * w0;
-						color_accum += *(vp0++) * ALPHA10K * w0;
-						color_accum += *(vp1++) * RED10K * w1;
-						color_accum += *(vp1++) * GREEN10K * w1;
-						color_accum += *(vp1++) * BLUE10K * w1;
-						color_accum += *(vp1++) * ALPHA10K * w1;
-						accum_scale = 1.0 / ((double)(w0+w1) * 40000.0 * 65536.0);
+						canvas_color_accum += *(vp0++) * (int64_t)RED10K;
+						canvas_color_accum += *(vp0++) * (int64_t)GREEN10K;
+						canvas_color_accum += *(vp0++) * (int64_t)BLUE10K;
+						canvas_color_accum += *(vp0++) * (int64_t)ALPHA10K;
+						vertex_color_accum += *(vp1++) * (int64_t)RED10K;
+						vertex_color_accum += *(vp1++) * (int64_t)GREEN10K;
+						vertex_color_accum += *(vp1++) * (int64_t)BLUE10K;
+						vertex_color_accum += *(vp1++) * (int64_t)ALPHA10K;
+						accum_scale = 1.0 / (40000.0 * 65536.0);
 						break;
 					default: assert(!"unhandled source_n_channels");
 					}
 				}
-				const double color_weight = (double)color_accum * accum_scale;
+				const double canvas_color_weight = (double)canvas_color_accum * accum_scale;
+				const double vertex_color_weight = (double)vertex_color_accum * accum_scale;
 				const struct triangle T = mk_triangle(
 					v0[0*g.n_trial_elems+0], v0[0*g.n_trial_elems+1],
 					v0[1*g.n_trial_elems+0], v0[1*g.n_trial_elems+1],
 					v0[2*g.n_trial_elems+0], v0[2*g.n_trial_elems+1]);
 
-				const double area = fabs(triangle_area(T));
-				if (area < 10.0) { // CFG? RETHINK?
-					continue;
-				}
-				const double fat = triangle_fatness(T);
-				if (fat < 0.01) { // CFG? RETHINK?
-					continue;
-				}
-				const double area_ratio = area / (double)(g.source_width*g.source_height);
-				const double area_score = pow(area_ratio, 0.01); // CFG
-				const double score = (0.2 + fat) * color_weight * area_score; // CFG
+				const double score = score_candidate(T, canvas_color_weight, vertex_color_weight);
+				if (score <= 0.0) continue;
 
 				if (score > g.best_score) {
 					g.best_score = score;
 					g.best_triangle = T;
-					g.best_color_weight = (double)color_weight;
+					g.best_color_weight = (double)vertex_color_weight;
 					uint16_t* src = &g.vtxbuf[3*g.n_trial_elems*i1];
 					uint16_t* dst = g.best_triangle_elems;
 					for (int i = 0; i < 3; i++) {
@@ -847,7 +849,7 @@ static void process_draw(void)
 #define IS_Q2 "(gl_VertexID == 2 || gl_VertexID == 4)"
 #define IS_Q3 "(gl_VertexID == 5)"
 
-static void process_run(const char* image_path)
+static void splot_process(const char* image_path, struct config* config)
 {
 	init();
 
@@ -1264,13 +1266,11 @@ static void process_run(const char* image_path)
 	//glDisable(GL_CULL_FACE); CHKGL;
 	glEnable(GL_BLEND); CHKGL;
 
-	xoshiro256_seed(&g.rng, 0); // CFG
-
 	g.next_primitve = 1;
 
 	while (frame()) {
 		g.frame_counter++;
-		const int n_searches_per_draw = 10;
+		const int n_searches_per_draw = 5; // CFG
 		for (int i = 0; i < n_searches_per_draw; i++) {
 			process_search();
 		}
@@ -1278,25 +1278,5 @@ static void process_run(const char* image_path)
 	}
 }
 
-int main(int argc, char** argv)
-{
-	prg = argv[0];
-	if (argc < 2) usage(NULL);
-
-	const char* cmd = argv[1];
-
-	if (strcmp("process", cmd) == 0) {
-		if (argc < 3) usagef("image is missing\n");
-		const char* image_path = argv[2];
-		process_run(image_path);
-	} else if (strcmp("view", cmd) == 0) {
-		assert(!"TODO");
-	} else if (strcmp("render", cmd) == 0) {
-		assert(!"TODO");
-	} else {
-		usagef("invalid cmd \"%s\"", cmd);
-	}
-
-	return EXIT_SUCCESS;
-
-}
+#define SPLOT_H
+#endif
