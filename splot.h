@@ -258,6 +258,11 @@ static inline struct level* get_current_level(void)
 	return &g.config->levels[i];
 }
 
+static inline int get_tri_num(void)
+{
+	return 1+(arrlen(g.chosen_vs)/(3*get_n_paint_elems()));
+}
+
 static inline double source_area(void) { return g.source_width * g.source_height; }
 
 static void check_shader(GLuint shader, GLenum type, int n_sources, const char** sources)
@@ -854,8 +859,8 @@ static void process_search(void)
 					g.best_triangle.B.x, g.best_triangle.B.y, 
 					g.best_triangle.C.x, g.best_triangle.C.y);
 			#endif
-			printf("tri %zd:%d/%d :: area=%.0f; fat=%.3f; cw=%.6f\n",
-				1+(arrlen(g.chosen_vs)/(3*get_n_paint_elems())),
+			printf("tri %d:%d/%d :: area=%.0f; fat=%.3f; cw=%.6f\n",
+				get_tri_num(),
 				1+g.level_index,
 				n_levels,
 				fabs(triangle_area(g.best_triangle)),
