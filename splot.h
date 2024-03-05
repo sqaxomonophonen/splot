@@ -17,6 +17,26 @@ struct config {
 #include <stdio.h>
 #include <assert.h>
 #include <stdarg.h>
+#include <time.h>
+
+typedef struct {
+	struct timespec ts;
+} TIME;
+
+static inline TIME NOW(void)
+{
+	TIME t;
+	assert(0 == clock_gettime(CLOCK_MONOTONIC, &t.ts));
+	return t;
+}
+
+static inline double DIFF(TIME ta, TIME tb)
+{
+	const double dt =
+		(double)(ta.ts.tv_sec - tb.ts.tv_sec) +
+		1e-9 * (double)(ta.ts.tv_nsec - tb.ts.tv_nsec);
+	return dt;
+}
 
 #include "gl3w.h"
 #include "stb_image.h"
@@ -24,6 +44,7 @@ struct config {
 #include "xoshiro256plusplus.h"
 
 #include <SDL.h>
+
 
 struct vec2 { double x,y; };
 struct triangle { struct vec2 A,B,C; };
@@ -111,6 +132,20 @@ enum mode {
 	MODE_DUMMY,
 };
 
+struct stat {
+	int _init;
+	TIME t0;
+	int n_lvls;
+	int n_lvl0s;
+	int n_generated_triangles;
+	int n_accepted_triangles;
+	int n_trial_runs;
+	int n_trials;
+	int n_underflows;
+	int n_rejected;
+	int n_accepted;
+};
+
 static struct {
 	SDL_Window* window;
 	SDL_GLContext glctx;
@@ -181,7 +216,9 @@ static struct {
 
 	uint64_t* canvas_cum_weight;
 	int* canvas_cum_idx;
+	struct stat stat;
 } g;
+
 
 static inline uint64_t rng_next(void)
 {
@@ -508,16 +545,49 @@ static uint16_t candidate_component(uint16_t src_pixel, uint16_t canvas_pixel);
 static int accept_triangle(struct triangle, const double* grays);
 static double score_candidate(struct triangle, double canvas_color_weight, double vertex_color_weight);
 
+static void stat_tick(void)
+{
+	TIME now = NOW();
+	if (!g.stat._init) {
+		g.stat.t0 = now;
+		g.stat._init = 1;
+	}
+	const double dt = DIFF(now, g.stat.t0);
+	if (dt < 0.2) return;
+
+	printf("STATISTICS frame=%d tri %d\n", g.frame_counter, get_tri_num());
+	#define ST(N) \
+	{ \
+		printf("  " #N "/s = %.2f\n", (double)g.stat.N / dt); \
+		g.stat.N = 0; \
+	}
+	ST(n_lvls)
+	ST(n_lvl0s)
+	ST(n_generated_triangles)
+	ST(n_accepted_triangles)
+	ST(n_trial_runs)
+	ST(n_trials)
+	ST(n_underflows)
+	ST(n_rejected)
+	ST(n_accepted)
+	#undef ST
+	g.stat.t0 = now;
+}
+
 static void process_search(void)
 {
+	stat_tick();
+
 	if (g.n_trials_remaining == 0) {
 		const int n_levels = get_n_levels();
 		g.level_index = (g.level_index + 1) % n_levels;
 		g.n_trials_remaining = get_current_level()->n;
+		g.stat.n_lvls++;
 
 		g.best_score = 0.0;
 
 		if (g.level_index == 0) {
+			g.stat.n_lvl0s++;
 			// download canvas, and use it to construct new binary searchable
 			// table for weighted pixel picking
 			glBindTexture(GL_TEXTURE_2D, g.canvas_tex); CHKGL;
@@ -652,6 +722,8 @@ static void process_search(void)
 				}
 			}
 
+			g.stat.n_generated_triangles++;
+
 			const int nt = get_n_trial_elems();
 
 			double grays[] = {0,0,0};
@@ -713,7 +785,10 @@ static void process_search(void)
 				signed_area = triangle_area(T);
 			}
 			assert(signed_area >= 0.0);
-			if (accept_triangle(T, grays)) break;
+			if (accept_triangle(T, grays)) {
+				g.stat.n_accepted_triangles++;
+				break;
+			}
 		}
 	}
 	const int batch_size = batch_index;
@@ -769,6 +844,7 @@ static void process_search(void)
 	); CHKGL;
 	glUniform1i(g.trial_uloc_canvas_tex, 0); CHKGL;
 
+	g.stat.n_trial_runs++;
 	glDrawArrays(GL_TRIANGLES, 0, 3*batch_size); CHKGL;
 
 	int n_trials = 0;
@@ -784,8 +860,10 @@ static void process_search(void)
 			for (; i1 < ((i0<<5)+32) && i1 < batch_size; i1++) {
 				const int underflow = atomics[i0] & (1 << (i1&31));
 				n_trials++;
+				g.stat.n_trials++;
 				if (underflow) {
 					n_underflows++;
+					g.stat.n_underflows++;
 					continue;
 				}
 				uint16_t* v0 = &g.vtxbuf[3*get_n_trial_elems()*i1];
@@ -837,7 +915,12 @@ static void process_search(void)
 					v0[2*nt+0], v0[2*nt+1]);
 
 				const double score = score_candidate(T, canvas_color_weight, vertex_color_weight);
-				if (score <= 0.0) continue;
+				if (score <= 0.0) {
+					g.stat.n_rejected++;
+					continue;
+				}
+
+				g.stat.n_accepted++;
 
 				if (score > g.best_score) {
 					g.best_score = score;
@@ -1488,6 +1571,7 @@ static void splot_process(const char* image_path, struct config* config)
 	glEnable(GL_BLEND); CHKGL;
 
 	g.level_index = -1;
+	stat_tick();
 
 	while (frame()) {
 		const int n_searches_per_draw = 4; // CFG
