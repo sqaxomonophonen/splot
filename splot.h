@@ -772,6 +772,8 @@ static void process_search(void)
 
 	glDrawArrays(GL_TRIANGLES, 0, 3*batch_size); CHKGL;
 
+	int n_trials = 0;
+	int n_underflows = 0;
 	{
 		GLuint* atomics = glMapBufferRange(
 			GL_ATOMIC_COUNTER_BUFFER,
@@ -782,7 +784,9 @@ static void process_search(void)
 		for (int i0 = 0; i0 < ((batch_size+31)>>5); i0++) {
 			for (; i1 < ((i0<<5)+32) && i1 < batch_size; i1++) {
 				const int underflow = atomics[i0] & (1 << (i1&31));
+				n_trials++;
 				if (underflow) {
+					n_underflows++;
 					continue;
 				}
 				uint16_t* v0 = &g.vtxbuf[3*get_n_trial_elems()*i1];
@@ -885,13 +889,15 @@ static void process_search(void)
 					g.best_triangle.B.x, g.best_triangle.B.y, 
 					g.best_triangle.C.x, g.best_triangle.C.y);
 			#endif
-			printf("tri %d:%d/%d :: area=%.0f; fat=%.3f; cw=%.6f\n",
+			printf("tri %d:%d/%d :: area=%.0f; fat=%.3f; cw=%.6f; underflow=%d/%d\n",
 				get_tri_num(),
 				1+g.level_index,
 				n_levels,
 				fabs(triangle_area(g.best_triangle)),
 				triangle_fatness(g.best_triangle),
-				g.best_color_weight
+				g.best_color_weight,
+				n_underflows,
+				n_trials
 			);
 			const int ncp = 3*get_n_paint_elems();
 			const size_t psz = sizeof(g.best_triangle_elems[0])*ncp;
