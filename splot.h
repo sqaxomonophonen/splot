@@ -6,6 +6,7 @@ struct level {
 	// these must be 0 in first level:
 	double r; // search radius
 	double cn; // color noise
+	double gn; // gray noise
 };
 
 struct config {
@@ -646,12 +647,13 @@ static void process_search(void)
 					*(vp++) = px;
 					*(vp++) = py;
 					*(vp++) = batch_index;
+					const double gs = (65535.0 * lvl->gn);
+					const double cs = (65535.0 * lvl->cn);
+					const double gn = gs == 0.0 ? 0.0 : rng_nextf() * gs - gs*0.5;
 					for (int i = 0; i < g.source_n_channels; i++) {
 						int c = g.winner_triangle[of+2+i];
-						const double s = (65535.0 * lvl->cn);
-						//printf("c %d -> ", c);
-						c += rng_nextf() * s - s*0.5;
-						//printf("%d\n", c);
+						c += gn;
+						if (cs != 0.0) c += rng_nextf() * cs - cs*0.5;
 						if (c < 0) c = 0;
 						if (c > 65535) c = 65535;
 						*(vp++) = c;

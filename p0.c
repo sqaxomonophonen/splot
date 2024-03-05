@@ -36,8 +36,8 @@ int main(int argc, char** argv)
 	splot_process(argv[1], &((struct config){
 		.levels = ((struct level[]) {
 			{ .n = 2000 , .w = 200 },
-			{ .n = 200  , .w = 500 , .r = 30 , .cn = 10.0 / 256.0 } ,
-			{ .n = 20  , .w = 0    , .r = 2  , .cn =  2.0 / 256.0 },
+			{ .n = 200  , .w = 500 , .r = 30 , .gn = 16.0 / 256.0, .cn = 4.0 / 256.0 } ,
+			{ .n = 20  , .w = 0    , .r = 2  , .gn = 1.0 / 256.0,  .cn = 1.0 / 256.0 },
 			{ 0 },
 		}),
 	}));
