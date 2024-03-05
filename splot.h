@@ -1,10 +1,10 @@
 #ifndef SPLOT_H
 
 struct level {
-	int w; // resolution; 0=source resolution
 	int n; // number of candidates
+	int w; // resolution; 0=source resolution
 	// these must be 0 in first level:
-	int r; // search radius
+	double r; // search radius
 	double cn; // color noise
 };
 
@@ -44,12 +44,17 @@ static inline double vec2_length(struct vec2 v)
 
 static inline struct vec2 vec2_sub(struct vec2 a, struct vec2 b)
 {
-	return (struct vec2) { .x=a.x-b.x, .y=a.y-b.y };
+	return mk_vec2(a.x-b.x, a.y-b.y);
 }
 
 static inline double vec2_distance(struct vec2 a, struct vec2 b)
 {
 	return vec2_length(vec2_sub(b, a));
+}
+
+static inline struct vec2 vec2_scale(struct vec2 v, double scalar)
+{
+	return mk_vec2(v.x*scalar, v.y*scalar);
 }
 
 static inline double triangle_area(struct triangle t)
@@ -98,55 +103,14 @@ static inline double triangle_fatness(struct triangle t)
 	return 2.0 * (triangle_inradius(t) / triangle_circumradius(t));
 }
 
-#define RED10K   (2126)
-#define GREEN10K (7152)
-#define BLUE10K  (722)
-#define ALPHA10K (10000)
-
-static inline const char* gl_err_string(GLenum err)
-{
-	switch (err) {
-	#define X(NAME) case NAME: return #NAME;
-	X(GL_NO_ERROR)
-	X(GL_INVALID_ENUM)
-	X(GL_INVALID_VALUE)
-	X(GL_INVALID_OPERATION)
-	X(GL_STACK_OVERFLOW)
-	X(GL_STACK_UNDERFLOW)
-	X(GL_OUT_OF_MEMORY)
-	#undef X
-	default: return "???";
-	}
-}
-
-static inline void _chkgl(const char* file, int line)
-{
-	GLenum xx_GLERR = glGetError();
-	if (xx_GLERR != GL_NO_ERROR) {
-		fprintf(stderr, "OPENGL ERROR 0x%.4x (%s) at %s:%d\n", xx_GLERR, gl_err_string(xx_GLERR), file, line);
-		abort();
-	}
-}
-
-#define CHKGL _chkgl(__FILE__, __LINE__)
-
-static const int trial_batch_size_log2 = 10; // CFG
-static const int n_trials_per_primitive = 1<<10; // CFG
-static const size_t paint_vbo_sz = 1<<20;
-
 static struct {
 	SDL_Window* window;
 	SDL_GLContext glctx;
 	int window_width;
 	int window_height;
-	GLint max_fragment_atomic_counters;
 
 	unsigned frame_counter;
-
-	int next_primitve;
-	int64_t canvas_accum;
-	int canvas_n_weights;
-	int trial_counter;
+	int max_batch_size_log2;
 
 	GLuint framebuffer;
 	GLuint vao;
@@ -180,37 +144,120 @@ static struct {
 
 	struct xoshiro256 rng;
 
+	uint16_t* canvas_image;
+	uint16_t* source_image;
+
+	struct config* config;
+	int level_index;
+	int n_trials_remaining;
+	uint16_t winner_triangle[3*6];
+	int64_t canvas_sum;
+	int canvas_n_weights;
 	size_t atomic_buffer_sz;
 	uint16_t* vtxbuf;
+
 	double best_score;
 	struct triangle best_triangle;
 	double best_color_weight;
 	uint16_t best_triangle_elems[3*6];
+
 	uint16_t* chosen_vs;
+
 	int source_width;
 	int source_height;
 	int source_n_channels;
-	uint16_t* canvas_image;
-	uint16_t* source_image;
+
 	uint64_t* canvas_cum_weight;
 	int* canvas_cum_idx;
-	int n_trial_elems;
-	int trial_stride;
-	int n_paint_elems;
-	int paint_stride;
 } g;
-
-static inline double source_area(void) { return g.source_width * g.source_height; }
 
 static inline uint64_t rng_next(void)
 {
 	return xoshiro256_next(&g.rng);
 }
 
+static double scalar64 = 0.0;
+static inline double rng_nextf(void)
+{
+	if (scalar64 == 0.0) scalar64 = pow(2.0, -64.0);
+	return ((double)rng_next()) * scalar64;
+}
+
 static inline void rng_seed(uint64_t seed)
 {
 	xoshiro256_seed(&g.rng, seed);
 }
+
+static inline struct vec2 rng_vec2_on_unit_circle(void)
+{
+	const double r = sqrt(rng_nextf());
+	const double theta = rng_nextf() * 6.283185307179586;
+	const double x = r * cos(theta);
+	const double y = r * sin(theta);
+	return mk_vec2(x,y);
+}
+
+#define RED10K   (2126)
+#define GREEN10K (7152)
+#define BLUE10K  (722)
+#define ALPHA10K (10000)
+
+static inline const char* gl_err_string(GLenum err)
+{
+	switch (err) {
+	#define X(NAME) case NAME: return #NAME;
+	X(GL_NO_ERROR)
+	X(GL_INVALID_ENUM)
+	X(GL_INVALID_VALUE)
+	X(GL_INVALID_OPERATION)
+	X(GL_STACK_OVERFLOW)
+	X(GL_STACK_UNDERFLOW)
+	X(GL_OUT_OF_MEMORY)
+	#undef X
+	default: return "???";
+	}
+}
+
+static inline void _chkgl(const char* file, int line)
+{
+	GLenum xx_GLERR = glGetError();
+	if (xx_GLERR != GL_NO_ERROR) {
+		fprintf(stderr, "OPENGL ERROR 0x%.4x (%s) at %s:%d\n", xx_GLERR, gl_err_string(xx_GLERR), file, line);
+		abort();
+	}
+}
+
+#define CHKGL _chkgl(__FILE__, __LINE__)
+
+static const size_t paint_vbo_sz = 1<<20;
+
+
+static inline int get_n_trial_elems(void) {
+	assert(g.source_n_channels > 0);
+	return 3 + g.source_n_channels;
+}
+static inline int get_n_paint_elems(void) {
+	assert(g.source_n_channels > 0);
+	return 2 + g.source_n_channels;
+}
+static inline size_t get_trial_stride(void) { return sizeof(uint16_t) * get_n_trial_elems(); }
+static inline size_t get_paint_stride(void) { return sizeof(uint16_t) * get_n_paint_elems(); }
+
+static inline int get_n_levels(void)
+{
+	int n_levels = 0;
+	for (struct level* l = g.config->levels; l->n; l++, n_levels++) {};
+	return n_levels;
+}
+
+static inline struct level* get_current_level(void)
+{
+	const int i = g.level_index;
+	assert(0 <= i && i < get_n_levels());
+	return &g.config->levels[i];
+}
+
+static inline double source_area(void) { return g.source_width * g.source_height; }
 
 static void check_shader(GLuint shader, GLenum type, int n_sources, const char** sources)
 {
@@ -388,10 +435,15 @@ static void init(void)
 	glGetIntegerv(GL_MINOR_VERSION, &gl_minor_version); CHKGL;
 	printf("OpenGL%d.%d / GLSL%s\n", gl_major_version, gl_minor_version, glGetString(GL_SHADING_LANGUAGE_VERSION));
 
+	{
+		GLint max_fragment_atomic_counters = -1;
+		glGetIntegerv(GL_MAX_FRAGMENT_ATOMIC_COUNTERS, &max_fragment_atomic_counters); CHKGL;
+		g.max_batch_size_log2 = 0;
+		while ( (1 << (g.max_batch_size_log2+1)) <= (max_fragment_atomic_counters/2) ) {
+				g.max_batch_size_log2++;
+		}
 
-	g.max_fragment_atomic_counters = -1;
-	glGetIntegerv(GL_MAX_FRAGMENT_ATOMIC_COUNTERS, &g.max_fragment_atomic_counters); CHKGL;
-	printf("max fragment atomic counters: %d\n", g.max_fragment_atomic_counters);
+	}
 }
 
 enum mode {
@@ -452,134 +504,188 @@ static double score_candidate(struct triangle, double canvas_color_weight, doubl
 
 static void process_search(void)
 {
-	if (g.next_primitve) {
-		g.trial_counter = 0;
-		g.next_primitve = 0;
+	if (g.n_trials_remaining == 0) {
+		const int n_levels = get_n_levels();
+		g.level_index = (g.level_index + 1) % n_levels;
+		g.n_trials_remaining = get_current_level()->n;
+
 		g.best_score = 0.0;
 
-		glBindTexture(GL_TEXTURE_2D, g.canvas_tex); CHKGL;
-		{
-			int tw, th;
-			glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tw);
-			glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &th);
-			assert(tw == g.source_width);
-			assert(th == g.source_height);
-		}
-		glGetTexImage(GL_TEXTURE_2D, 0, g.source_format, GL_UNSIGNED_SHORT, g.canvas_image);
-		glBindTexture(GL_TEXTURE_2D, 0); CHKGL;
-
-		uint16_t* p = g.canvas_image;
-		g.canvas_accum = 0;
-		uint64_t* cwp = g.canvas_cum_weight;
-		int* cip = g.canvas_cum_idx;
-		int pixel_index = 0;
-		for (int y = 0; y < g.source_height; y++) {
-			for (int x = 0; x < g.source_width; x++) {
-				int s = 0;
-				switch (g.source_n_channels) {
-				case 1:
-					s += *(p++);
-					break;
-				case 3:
-					s += *(p++) * RED10K;
-					s += *(p++) * GREEN10K;
-					s += *(p++) * BLUE10K;
-					break;
-				case 4:
-					s += *(p++) * RED10K;
-					s += *(p++) * GREEN10K;
-					s += *(p++) * BLUE10K;
-					s += *(p++) * ALPHA10K;
-					break;
-				default: assert(!"unhandled source_n_channels");
-				}
-
-				if (s > 0) {
-					g.canvas_accum += s;
-					*(cwp++) = g.canvas_accum;
-					*(cip++) = pixel_index;
-				}
-				pixel_index++;
+		if (g.level_index == 0) {
+			// download canvas, and use it to construct new binary searchable
+			// table for weighted pixel picking
+			glBindTexture(GL_TEXTURE_2D, g.canvas_tex); CHKGL;
+			{
+				int tw, th;
+				glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tw);
+				glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &th);
+				assert(tw == g.source_width);
+				assert(th == g.source_height);
 			}
+			glGetTexImage(GL_TEXTURE_2D, 0, g.source_format, GL_UNSIGNED_SHORT, g.canvas_image);
+			glBindTexture(GL_TEXTURE_2D, 0); CHKGL;
+
+			uint16_t* p = g.canvas_image;
+			int64_t canvas_accum = 0;
+			uint64_t* cwp = g.canvas_cum_weight;
+			int* cip = g.canvas_cum_idx;
+			int pixel_index = 0;
+			for (int y = 0; y < g.source_height; y++) {
+				for (int x = 0; x < g.source_width; x++) {
+					int s = 0;
+					switch (g.source_n_channels) {
+					case 1:
+						s += *(p++);
+						break;
+					case 3:
+						s += *(p++) * RED10K;
+						s += *(p++) * GREEN10K;
+						s += *(p++) * BLUE10K;
+						break;
+					case 4:
+						s += *(p++) * RED10K;
+						s += *(p++) * GREEN10K;
+						s += *(p++) * BLUE10K;
+						s += *(p++) * ALPHA10K;
+						break;
+					default: assert(!"unhandled source_n_channels");
+					}
+
+					if (s > 0) {
+						canvas_accum += s;
+						*(cwp++) = canvas_accum;
+						*(cip++) = pixel_index;
+					}
+					pixel_index++;
+				}
+			}
+			g.canvas_sum = canvas_accum;
+			g.canvas_n_weights = cwp - g.canvas_cum_weight;
+			assert(g.canvas_n_weights == (cip - g.canvas_cum_idx));
 		}
-		g.canvas_n_weights = cwp - g.canvas_cum_weight;
-		assert(g.canvas_n_weights == (cip - g.canvas_cum_idx));
 	}
 
 	arrsetlen(g.vtxbuf, 0);
 
-	int batch_trial_index = 0;
-	const int trial_batch_size = 1 << trial_batch_size_log2;
-	for (batch_trial_index = 0; batch_trial_index < trial_batch_size && g.trial_counter < n_trials_per_primitive; batch_trial_index++, g.trial_counter++) {
-		uint16_t* v0 = arraddnptr(g.vtxbuf, 3*g.n_trial_elems);
+	struct level* lvl = get_current_level();
+	const int virtual_width = (lvl->w == 0 || lvl->w > g.source_width) ? g.source_width : lvl->w;
+	const int virtual_height = (g.source_height * virtual_width) / g.source_width;
+
+	int batch_index = 0;
+	const int max_batch_size = 1 << g.max_batch_size_log2;
+	for (batch_index = 0; batch_index < max_batch_size && g.n_trials_remaining > 0; batch_index++, g.n_trials_remaining--) {
+		uint16_t* v0 = arraddnptr(g.vtxbuf, 3*get_n_trial_elems());
 		const int max_attempts = 100; // CFG?
 		for (int attempt = 0; attempt < max_attempts; attempt++) {
-			uint16_t* v = v0;
-			for (int point = 0; point < 3; point++) {
-				assert(g.canvas_accum > 0);
-				int idx, px, py;
-				if (attempt < max_attempts/2) { // CFG?
-					uint64_t find = rng_next() % g.canvas_accum;
+			uint16_t* vp = v0;
+			if (g.level_index == 0) {
+				for (int point = 0; point < 3; point++) {
+					assert(g.canvas_sum > 0);
+					int idx, px, py;
+					if (attempt < max_attempts/2) { // CFG?
+						uint64_t find = rng_next() % g.canvas_sum;
 
-					int left = 0;
-					int right = g.canvas_n_weights;
-					int n_iterations = 0;
-					while (left < right) {
-						n_iterations++;
-						int mid = (left + right) >> 1;
-						uint64_t wk = g.canvas_cum_weight[mid];
-						if (wk > find) {
-							right = mid;
-						} else {
-							left = mid + 1;
+						int left = 0;
+						int right = g.canvas_n_weights;
+						int n_iterations = 0;
+						while (left < right) {
+							n_iterations++;
+							int mid = (left + right) >> 1;
+							uint64_t wk = g.canvas_cum_weight[mid];
+							if (wk > find) {
+								right = mid;
+							} else {
+								left = mid + 1;
+							}
 						}
+
+						const int cidx = (right-1) < 0 ? 0 : (right-1);
+						assert(cidx >= 0);
+						idx = g.canvas_cum_idx[cidx];
+						px = idx % g.source_width;
+						py = idx / g.source_width;
+					} else {
+						uint64_t r0 = rng_next() % g.canvas_sum;
+						px = r0 % g.source_width;
+						py = (r0/g.source_width) % g.source_height;
+						idx = px + py * g.source_width;
 					}
+					uint16_t* canvas_pixel = &g.canvas_image[idx*g.source_n_channels];
+					uint16_t* src_pixel = &g.source_image[idx*g.source_n_channels];
 
-					const int cidx = (right-1) < 0 ? 0 : (right-1);
-					assert(cidx >= 0);
-					idx = g.canvas_cum_idx[cidx];
-					px = idx % g.source_width;
-					py = idx / g.source_width;
-				} else {
-					uint64_t r0 = rng_next() % g.canvas_accum;
-					px = r0 % g.source_width;
-					py = (r0/g.source_width) % g.source_height;
-					idx = px + py * g.source_width;
+					*(vp++) = px;
+					*(vp++) = py;
+					*(vp++) = batch_index;
+					for (int i = 0; i < g.source_n_channels; i++) {
+						*(vp++) = candidate_component(src_pixel[i], canvas_pixel[i]);
+					}
 				}
-				uint16_t* canvas_pixel = &g.canvas_image[idx*g.source_n_channels];
-				uint16_t* src_pixel = &g.source_image[idx*g.source_n_channels];
+			} else {
+				assert(g.level_index > 0);
+				for (int point = 0; point < 3; point++) {
+					struct vec2 d = rng_vec2_on_unit_circle();
+					struct level* lvl = get_current_level();
+					const double r = lvl->r * ((double)g.source_width / (double)virtual_width);
+					assert(r > 0);
+					d = vec2_scale(d, r);
 
-				*(v++) = px;
-				*(v++) = py;
-				*(v++) = batch_trial_index;
-				for (int i = 0; i < g.source_n_channels; i++) {
-					*(v++) = candidate_component(src_pixel[i], canvas_pixel[i]);
+					const int of = point * get_n_paint_elems();
+					int px = g.winner_triangle[of+0] + d.x;
+					int py = g.winner_triangle[of+1] + d.y;
+					//printf("d%f,%f -> %d,%d\n", d.x, d.y, px, py);
+					if (px < 0) px = 0;
+					if (py < 0) py = 0;
+					if (px >= g.source_width) px = g.source_width-1;
+					if (py >= g.source_height) py = g.source_height-1;
+					*(vp++) = px;
+					*(vp++) = py;
+					*(vp++) = batch_index;
+					for (int i = 0; i < g.source_n_channels; i++) {
+						int c = g.winner_triangle[of+2+i];
+						const double s = (65535.0 * lvl->cn);
+						c += rng_nextf() * s - s*0.5;
+						if (c < 0) c = 0;
+						if (c > 65535) c = 65535;
+						*(vp++) = c;
+					}
 				}
 			}
-			assert((v-v0) == 3*g.n_trial_elems);
+
+			const int nt = get_n_trial_elems();
+
+			int64_t csum = 0;
+			for (int point = 0; point < 3; point++) {
+				for (int i = 0; i < g.source_n_channels; i++) {
+					csum += v0[point*nt+3+i];
+				}
+			}
+			if (csum == 0) continue;
+
+			assert((vp-v0) == 3*nt);
 			struct triangle T = mk_triangle(
-				v0[0*g.n_trial_elems+0], v0[0*g.n_trial_elems+1],
-				v0[1*g.n_trial_elems+0], v0[1*g.n_trial_elems+1],
-				v0[2*g.n_trial_elems+0], v0[2*g.n_trial_elems+1]);
+				v0[0*nt+0], v0[0*nt+1],
+				v0[1*nt+0], v0[1*nt+1],
+				v0[2*nt+0], v0[2*nt+1]);
 			double signed_area = triangle_area(T);
 			if (signed_area < 0.0) {
-				uint16_t* v = v0;
 				uint16_t tmp[7];
-				const size_t sz = sizeof(tmp[0]) * g.n_trial_elems;
-				memcpy(tmp, &v0[1*g.n_trial_elems], sz);
-				memcpy(&v0[1*g.n_trial_elems], &v0[2*g.n_trial_elems], sz);
-				memcpy(&v0[2*g.n_trial_elems], tmp, sz);
+				const size_t sz = sizeof(tmp[0]) * nt;
+				memcpy(tmp, &v0[1*nt], sz);
+				memcpy(&v0[1*nt], &v0[2*nt], sz);
+				memcpy(&v0[2*nt], tmp, sz);
 				T = mk_triangle(
-					v0[0*g.n_trial_elems+0], v0[0*g.n_trial_elems+1],
-					v0[1*g.n_trial_elems+0], v0[1*g.n_trial_elems+1],
-					v0[2*g.n_trial_elems+0], v0[2*g.n_trial_elems+1]);
+					v0[0*nt+0], v0[0*nt+1],
+					v0[1*nt+0], v0[1*nt+1],
+					v0[2*nt+0], v0[2*nt+1]);
 				signed_area = triangle_area(T);
 			}
 			assert(signed_area >= 0.0);
 			if (accept_triangle(T)) break;
 		}
 	}
-	const int batch_size = batch_trial_index;
+	const int batch_size = batch_index;
+
+	assert(batch_size > 0);
 
 	glBindFramebuffer(GL_FRAMEBUFFER, g.framebuffer); CHKGL;
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g.dummy_fb_tex, /*level=*/0); CHKGL;
@@ -592,6 +698,7 @@ static void process_search(void)
 
 	glUseProgram(g.trial_prg); CHKGL;
 
+	// clear atomic signals
 	glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, g.signal_buf); CHKGL;
 	{
 		GLuint* a = glMapBufferRange(
@@ -601,7 +708,6 @@ static void process_search(void)
 		memset(a, 0, g.atomic_buffer_sz);
 		glUnmapBuffer(GL_ATOMIC_COUNTER_BUFFER); CHKGL;
 	}
-
 	glBindBufferRange(GL_ATOMIC_COUNTER_BUFFER, 0, g.signal_buf, 0, g.atomic_buffer_sz); CHKGL;
 
 	glBindBuffer(GL_ARRAY_BUFFER, g.trial_vbo); CHKGL;
@@ -612,13 +718,16 @@ static void process_search(void)
 	glEnableVertexAttribArray(g.trial_aloc_signal); CHKGL;
 	glEnableVertexAttribArray(g.trial_aloc_color); CHKGL;
 
-	glVertexAttribPointer(g.trial_aloc_pos, 2, GL_UNSIGNED_SHORT, GL_TRUE, g.trial_stride, (void*)0); CHKGL;
-	glVertexAttribPointer(g.trial_aloc_signal, 1, GL_UNSIGNED_SHORT, GL_FALSE, g.trial_stride, (void*)4); CHKGL;
-	glVertexAttribPointer(g.trial_aloc_color,  g.source_n_channels, GL_UNSIGNED_SHORT, GL_TRUE,  g.trial_stride, (void*)6); CHKGL;
+	glVertexAttribPointer(g.trial_aloc_pos, 2, GL_UNSIGNED_SHORT, GL_TRUE, get_trial_stride(), (void*)0); CHKGL;
+	glVertexAttribPointer(g.trial_aloc_signal, 1, GL_UNSIGNED_SHORT, GL_FALSE, get_trial_stride(), (void*)4); CHKGL;
+	glVertexAttribPointer(g.trial_aloc_color,  g.source_n_channels, GL_UNSIGNED_SHORT, GL_TRUE,  get_trial_stride(), (void*)6); CHKGL;
 
 
 	glBindTexture(GL_TEXTURE_2D, g.canvas_tex); CHKGL;
-	glUniform2f(g.trial_uloc_scale, 65536.0f / (float)g.source_width, 65536.0f / (float)g.source_height); CHKGL;
+	glUniform2f(g.trial_uloc_scale,
+		65535.0f / (float)virtual_width,
+		65535.0f / (float)virtual_height
+	); CHKGL;
 	glUniform1i(g.trial_uloc_canvas_tex, 0); CHKGL;
 
 	glDrawArrays(GL_TRIANGLES, 0, 3*batch_size); CHKGL;
@@ -636,12 +745,12 @@ static void process_search(void)
 				if (underflow) {
 					continue;
 				}
-				uint16_t* v0 = &g.vtxbuf[3*g.n_trial_elems*i1];
+				uint16_t* v0 = &g.vtxbuf[3*get_n_trial_elems()*i1];
 				uint16_t* v1 = v0;
 				int64_t canvas_color_accum = 0;
 				int64_t vertex_color_accum = 0;
 				double accum_scale;
-				for (int i2 = 0; i2 < 3; i2++, v1 += g.n_trial_elems) {
+				for (int i2 = 0; i2 < 3; i2++, v1 += get_n_trial_elems()) {
 					assert(v1[2] == i1);
 					uint16_t* vp0 = &g.canvas_image[(v1[0] + v1[1] * g.source_width) * g.source_n_channels];
 					uint16_t* vp1 = &v1[3];
@@ -677,10 +786,12 @@ static void process_search(void)
 				}
 				const double canvas_color_weight = (double)canvas_color_accum * accum_scale;
 				const double vertex_color_weight = (double)vertex_color_accum * accum_scale;
+
+				const int nt = get_n_trial_elems();
 				const struct triangle T = mk_triangle(
-					v0[0*g.n_trial_elems+0], v0[0*g.n_trial_elems+1],
-					v0[1*g.n_trial_elems+0], v0[1*g.n_trial_elems+1],
-					v0[2*g.n_trial_elems+0], v0[2*g.n_trial_elems+1]);
+					v0[0*nt+0], v0[0*nt+1],
+					v0[1*nt+0], v0[1*nt+1],
+					v0[2*nt+0], v0[2*nt+1]);
 
 				const double score = score_candidate(T, canvas_color_weight, vertex_color_weight);
 				if (score <= 0.0) continue;
@@ -689,7 +800,7 @@ static void process_search(void)
 					g.best_score = score;
 					g.best_triangle = T;
 					g.best_color_weight = (double)vertex_color_weight;
-					uint16_t* src = &g.vtxbuf[3*g.n_trial_elems*i1];
+					uint16_t* src = &g.vtxbuf[3*nt*i1];
 					uint16_t* dst = g.best_triangle_elems;
 					for (int i = 0; i < 3; i++) {
 						*(dst++) = *(src++);
@@ -717,53 +828,71 @@ static void process_search(void)
 	glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, 0); CHKGL;
 	glUseProgram(0); CHKGL;
 
-	if (g.trial_counter == n_trials_per_primitive) {
-		g.next_primitve = 1;
-		if (g.best_score > 0) {
-			const int ncp = 3*g.n_paint_elems;
-			uint16_t* vout = arraddnptr(g.chosen_vs, ncp);
-			memcpy(vout, g.best_triangle_elems, sizeof(vout[0])*ncp);
-			printf("chose triangle %zd: area=%.0f; fat=%.3f; cw=%.6f\n",
-				arrlen(g.chosen_vs)/(3*g.n_paint_elems),
+	assert(g.n_trials_remaining >= 0);
+	if (g.n_trials_remaining == 0) {
+		if (g.best_score <= 0) {
+			//g.n_trials_remaining = get_current_level()->n;
+			//printf("at level %d; failed to find a valid candidate after %d trials; going for another pass\n", g.level_index+1, g.n_trials_remaining);
+			printf("at level %d; failure after %d trials; starting over\n", g.level_index+1, get_current_level()->n);
+			g.level_index = -1;
+		} else {
+			const int n_levels = get_n_levels();
+			const int is_final_level = (g.level_index+1) == n_levels;
+			#if 0
+			printf("tria [%f,%f]-[%f,%f]-[%f,%f]\n",
+					g.best_triangle.A.x, g.best_triangle.A.y, 
+					g.best_triangle.B.x, g.best_triangle.B.y, 
+					g.best_triangle.C.x, g.best_triangle.C.y);
+			#endif
+			printf("tri %zd:%d/%d :: area=%.0f; fat=%.3f; cw=%.6f\n",
+				1+(arrlen(g.chosen_vs)/(3*get_n_paint_elems())),
+				1+g.level_index,
+				n_levels,
 				fabs(triangle_area(g.best_triangle)),
 				triangle_fatness(g.best_triangle),
 				g.best_color_weight
 			);
+			const int ncp = 3*get_n_paint_elems();
+			const size_t psz = sizeof(g.best_triangle_elems[0])*ncp;
+			if (!is_final_level) {
+				memcpy(g.winner_triangle, g.best_triangle_elems, psz);
+			} else {
+				// store triangle, update canvas
+				uint16_t* vout = arraddnptr(g.chosen_vs, ncp);
+				memcpy(vout, g.best_triangle_elems, psz);
 
-			glBindBuffer(GL_ARRAY_BUFFER, g.paint_vbo); CHKGL;
-			const size_t blitsz = sizeof(g.chosen_vs[0]) * arrlen(g.chosen_vs);
-			assert(blitsz <= paint_vbo_sz);
-			glBufferSubData(GL_ARRAY_BUFFER, 0, blitsz, g.chosen_vs); CHKGL;
-			glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
+				glBindBuffer(GL_ARRAY_BUFFER, g.paint_vbo); CHKGL;
+				const size_t blitsz = sizeof(g.chosen_vs[0]) * arrlen(g.chosen_vs);
+				assert(blitsz <= paint_vbo_sz);
+				glBufferSubData(GL_ARRAY_BUFFER, 0, blitsz, g.chosen_vs); CHKGL;
+				glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
 
-			// update canvas
+				glBindFramebuffer(GL_FRAMEBUFFER, g.framebuffer); CHKGL;
+				glViewport(0, 0, g.source_width, g.source_height);
+				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g.canvas_tex, /*level=*/0); CHKGL;
+				assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+				glUseProgram(g.paint_prg); CHKGL;
+				glBindVertexArray(g.vao); CHKGL;
+				glBindBuffer(GL_ARRAY_BUFFER, g.paint_vbo); CHKGL;
+				glEnableVertexAttribArray(g.paint_aloc_pos); CHKGL;
+				glEnableVertexAttribArray(g.paint_aloc_color); CHKGL;
 
-			glBindFramebuffer(GL_FRAMEBUFFER, g.framebuffer); CHKGL;
-			glViewport(0, 0, g.source_width, g.source_height);
-			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g.canvas_tex, /*level=*/0); CHKGL;
-			assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
-			glUseProgram(g.paint_prg); CHKGL;
-			glBindVertexArray(g.vao); CHKGL;
-			glBindBuffer(GL_ARRAY_BUFFER, g.paint_vbo); CHKGL;
-			glEnableVertexAttribArray(g.paint_aloc_pos); CHKGL;
-			glEnableVertexAttribArray(g.paint_aloc_color); CHKGL;
+				glVertexAttribPointer(g.paint_aloc_pos, 2, GL_UNSIGNED_SHORT, GL_TRUE, get_paint_stride(), (void*)0); CHKGL;
+				glVertexAttribPointer(g.paint_aloc_color,  g.source_n_channels, GL_UNSIGNED_SHORT, GL_TRUE,  get_paint_stride(), (void*)4); CHKGL;
+				glUniform2f(g.paint_uloc_scale, 65536.0f / (float)g.source_width, 65536.0f / (float)g.source_height); CHKGL;
 
-			glVertexAttribPointer(g.paint_aloc_pos, 2, GL_UNSIGNED_SHORT, GL_TRUE, g.paint_stride, (void*)0); CHKGL;
-			glVertexAttribPointer(g.paint_aloc_color,  g.source_n_channels, GL_UNSIGNED_SHORT, GL_TRUE,  g.paint_stride, (void*)4); CHKGL;
-			glUniform2f(g.paint_uloc_scale, 65536.0f / (float)g.source_width, 65536.0f / (float)g.source_height); CHKGL;
+				glBlendFunc(GL_ONE, GL_ONE); CHKGL;
+				glBlendEquation(GL_FUNC_REVERSE_SUBTRACT); CHKGL;
 
-			glBlendFunc(GL_ONE, GL_ONE); CHKGL;
-			glBlendEquation(GL_FUNC_REVERSE_SUBTRACT); CHKGL;
+				glDrawArrays(GL_TRIANGLES, arrlen(g.chosen_vs)/get_n_paint_elems()-3, 3); CHKGL;
+				glBlendEquation(GL_FUNC_ADD); CHKGL;
 
-			glDrawArrays(GL_TRIANGLES, arrlen(g.chosen_vs)/g.n_paint_elems-3, 3); CHKGL;
-			glBlendEquation(GL_FUNC_ADD); CHKGL;
-
-			glDisableVertexAttribArray(g.paint_aloc_color); CHKGL;
-			glDisableVertexAttribArray(g.paint_aloc_pos); CHKGL;
-			glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
-			glBindVertexArray(0); CHKGL;
-			glUseProgram(0); CHKGL;
-
+				glDisableVertexAttribArray(g.paint_aloc_color); CHKGL;
+				glDisableVertexAttribArray(g.paint_aloc_pos); CHKGL;
+				glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
+				glBindVertexArray(0); CHKGL;
+				glUseProgram(0); CHKGL;
+			}
 		}
 	}
 }
@@ -785,14 +914,14 @@ static void process_draw(void)
 			glEnableVertexAttribArray(g.present_aloc_pos); CHKGL;
 			glEnableVertexAttribArray(g.present_aloc_color); CHKGL;
 
-			glVertexAttribPointer(g.present_aloc_pos, 2, GL_UNSIGNED_SHORT, GL_TRUE, g.paint_stride, (void*)0); CHKGL;
-			glVertexAttribPointer(g.present_aloc_color,  g.source_n_channels, GL_UNSIGNED_SHORT, GL_TRUE,  g.paint_stride, (void*)4); CHKGL;
+			glVertexAttribPointer(g.present_aloc_pos, 2, GL_UNSIGNED_SHORT, GL_TRUE, get_paint_stride(), (void*)0); CHKGL;
+			glVertexAttribPointer(g.present_aloc_color,  g.source_n_channels, GL_UNSIGNED_SHORT, GL_TRUE,  get_paint_stride(), (void*)4); CHKGL;
 			glUniform2f(g.present_uloc_scale, 65536.0f / (float)g.source_width, 65536.0f / (float)g.source_height); CHKGL;
 			glUniform1ui(g.present_uloc_frame, g.frame_counter); CHKGL;
 
 			glBlendFunc(GL_ONE, GL_ONE); CHKGL;
 
-			glDrawArrays(GL_TRIANGLES, 0, arrlen(g.chosen_vs)/g.n_paint_elems); CHKGL;
+			glDrawArrays(GL_TRIANGLES, 0, arrlen(g.chosen_vs)/get_n_paint_elems()); CHKGL;
 
 			glDisableVertexAttribArray(g.present_aloc_color); CHKGL;
 			glDisableVertexAttribArray(g.present_aloc_pos); CHKGL;
@@ -851,6 +980,8 @@ static void process_draw(void)
 
 static void splot_process(const char* image_path, struct config* config)
 {
+	g.config = config;
+
 	init();
 
 	assert(image_path != NULL);
@@ -913,17 +1044,11 @@ static void splot_process(const char* image_path, struct config* config)
 
 	glBindTexture(GL_TEXTURE_2D, 0); CHKGL;
 
-	g.n_trial_elems = 3 + g.source_n_channels;
-	g.trial_stride = sizeof(uint16_t) * g.n_trial_elems;
-
-	g.n_paint_elems = 2 + g.source_n_channels;
-	g.paint_stride = sizeof(uint16_t) * g.n_paint_elems;
-
 	glGenVertexArrays(1, &g.vao); CHKGL;
 
 	glGenBuffers(1, &g.trial_vbo); CHKGL;
 	glBindBuffer(GL_ARRAY_BUFFER, g.trial_vbo); CHKGL;
-	glBufferData(GL_ARRAY_BUFFER, (1 << trial_batch_size_log2) * 3 * g.trial_stride, NULL, GL_DYNAMIC_DRAW); CHKGL;
+	glBufferData(GL_ARRAY_BUFFER, (1 << g.max_batch_size_log2) * 3 * get_trial_stride(), NULL, GL_DYNAMIC_DRAW); CHKGL;
 	glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
 
 	glGenBuffers(1, &g.paint_vbo); CHKGL;
@@ -945,8 +1070,8 @@ static void splot_process(const char* image_path, struct config* config)
 	default: assert(!"unhandled source_n_channels");
 	}
 
-	const int n_signal_u32s = 1 << (trial_batch_size_log2 - 5);
-	assert(g.max_fragment_atomic_counters >= n_signal_u32s);
+	assert(g.max_batch_size_log2 >= 5);
+	const int n_signal_u32s = 1 << (g.max_batch_size_log2 - 5);
 	char n_signal_u32s_str[1<<5];
 	snprintf(n_signal_u32s_str, sizeof n_signal_u32s_str, "%d", n_signal_u32s);
 
@@ -1266,7 +1391,7 @@ static void splot_process(const char* image_path, struct config* config)
 	//glDisable(GL_CULL_FACE); CHKGL;
 	glEnable(GL_BLEND); CHKGL;
 
-	g.next_primitve = 1;
+	g.level_index = -1;
 
 	while (frame()) {
 		g.frame_counter++;

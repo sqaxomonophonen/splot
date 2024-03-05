@@ -13,6 +13,8 @@ OBJS=gl3w.o stb_image.o stb_ds.o
 
 all: p0
 
+p0.o: p0.c splot.h
+
 p0: p0.o $(OBJS)
 
 clean:

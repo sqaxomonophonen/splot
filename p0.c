@@ -34,9 +34,9 @@ int main(int argc, char** argv)
 	rng_seed(0);
 	splot_process(argv[1], &((struct config){
 		.levels = ((struct level[]) {
-			{ .n = 1000 , .w = 200 },
-			{ .n = 300  , .w = 500 , .r = 10 , .cn = 16.0 / 256.0 } ,
-			{ .n = 100  , .w = 0   , .r = 3  , .cn =  2.0 / 256.0 },
+			{ .n = 1000 , .w = 160 },
+			{ .n = 500  , .w = 400 , .r = 10 , .cn = 10.0 / 256.0 } ,
+			{ .n = 80  , .w = 0    , .r = 2  , .cn =  2.0 / 256.0 },
 			{ 0 },
 		}),
 	}));
