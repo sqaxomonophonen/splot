@@ -123,7 +123,8 @@ static struct {
 	GLuint paint_vbo;
 	GLuint trial_vbo;
 
-	GLint trial_uloc_scale;
+	GLint trial_uloc_pos_scale;
+	GLint trial_uloc_uv_scale;
 	GLint trial_uloc_canvas_tex;
 	GLint trial_aloc_pos;
 	GLint trial_aloc_signal;
@@ -582,7 +583,8 @@ static void process_search(void)
 				for (int point = 0; point < 3; point++) {
 					assert(g.canvas_sum > 0);
 					int idx, px, py;
-					if (attempt < max_attempts/2) { // CFG?
+					//if (attempt < max_attempts/2) { // CFG?
+					if (0) {
 						uint64_t find = rng_next() % g.canvas_sum;
 
 						int left = 0;
@@ -643,7 +645,9 @@ static void process_search(void)
 					for (int i = 0; i < g.source_n_channels; i++) {
 						int c = g.winner_triangle[of+2+i];
 						const double s = (65535.0 * lvl->cn);
+						//printf("c %d -> ", c);
 						c += rng_nextf() * s - s*0.5;
+						//printf("%d\n", c);
 						if (c < 0) c = 0;
 						if (c > 65535) c = 65535;
 						*(vp++) = c;
@@ -724,9 +728,15 @@ static void process_search(void)
 
 
 	glBindTexture(GL_TEXTURE_2D, g.canvas_tex); CHKGL;
-	glUniform2f(g.trial_uloc_scale,
-		65535.0f / (float)virtual_width,
-		65535.0f / (float)virtual_height
+	const double sx = 65535.0f / (float)g.source_width;
+	const double sy = 65535.0f / (float)g.source_height;
+	glUniform2f(g.trial_uloc_pos_scale,
+		sx * ((float)virtual_width / (float)g.source_width),
+		sy * ((float)virtual_height / (float)g.source_height)
+	); CHKGL;
+	glUniform2f(g.trial_uloc_uv_scale,
+		sx,
+		sy
 	); CHKGL;
 	glUniform1i(g.trial_uloc_canvas_tex, 0); CHKGL;
 
@@ -830,7 +840,8 @@ static void process_search(void)
 
 	assert(g.n_trials_remaining >= 0);
 	if (g.n_trials_remaining == 0) {
-		if (g.best_score <= 0) {
+		assert(g.best_score >= 0.0);
+		if (g.best_score == 0.0) {
 			//g.n_trials_remaining = get_current_level()->n;
 			//printf("at level %d; failed to find a valid candidate after %d trials; going for another pass\n", g.level_index+1, g.n_trials_remaining);
 			printf("at level %d; failure after %d trials; starting over\n", g.level_index+1, get_current_level()->n);
@@ -1303,7 +1314,8 @@ static void splot_process(const char* image_path, struct config* config)
 	"\n"
 	, define_colortype_glsl ,
 	"\n"
-	"layout (location = 0) uniform vec2 u_scale;\n"
+	"layout (location = 0) uniform vec2 u_pos_scale;\n"
+	"layout (location = 1) uniform vec2 u_uv_scale;\n"
 	"\n"
 	"in vec2 a_pos;\n"
 	"in float a_signal;\n"
@@ -1316,12 +1328,11 @@ static void splot_process(const char* image_path, struct config* config)
 	"\n"
 	"void main()\n"
 	"{\n"
-	"	vec2 c = a_pos * u_scale;\n"
-	"	v_uv = c;\n"
+	"	vec2 pos = vec2(-1.0, -1.0) + (a_pos * u_pos_scale) * vec2(2.0,  2.0);\n"
+	"	v_uv = a_pos * u_uv_scale;\n"
 	"	v_color = a_color;\n"
 	"	v_signal_arrindex = uint(a_signal) >> 5u;\n"
 	"	v_signal_mask = 1u << (uint(a_signal) & 31u);\n"
-	"	vec2 pos = vec2(-1.0, -1.0) + c * vec2(2.0,  2.0);\n"
 	"	gl_Position = vec4(pos, 0.0, 1.0);\n"
 	"}\n"
 
@@ -1332,7 +1343,7 @@ static void splot_process(const char* image_path, struct config* config)
 	"\n"
 	, define_colortype_glsl ,
 	"\n"
-	"layout (location = 1) uniform sampler2D u_canvas_tex;\n"
+	"layout (location = 2) uniform sampler2D u_canvas_tex;\n"
 	"layout (binding = 0, offset = 0) uniform atomic_uint u_signal[\n"
 		, n_signal_u32s_str ,
 	"];\n"
@@ -1381,7 +1392,8 @@ static void splot_process(const char* image_path, struct config* config)
 
 	g.trial_prg = mk_render_program(3, 9, trial_sources);
 
-	g.trial_uloc_scale = glGetUniformLocation(g.trial_prg, "u_scale");
+	g.trial_uloc_pos_scale = glGetUniformLocation(g.trial_prg, "u_pos_scale");
+	g.trial_uloc_uv_scale = glGetUniformLocation(g.trial_prg, "u_uv_scale");
 	g.trial_uloc_canvas_tex = glGetUniformLocation(g.trial_prg, "u_canvas_tex");
 
 	g.trial_aloc_pos    = glGetAttribLocation(g.trial_prg, "a_pos");

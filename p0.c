@@ -21,11 +21,10 @@ static double score_candidate(struct triangle T, double canvas_color_weight, dou
 {
 	const double area = fabs(triangle_area(T));
 	if (area < 10.0) return 0;
-	const double fat = triangle_fatness(T);
 	const double area_ratio = area / source_area();
 	const double area_score = pow(area_ratio, 0.01);
-	const double color_weight = 1.0*canvas_color_weight + 4.0*vertex_color_weight;
-	const double fat_score = powf(fat, 0.5);
+	const double color_weight = g.level_index > 0 ? 1.0 : (1.0*canvas_color_weight + 4.0*vertex_color_weight);
+	const double fat_score = g.level_index > 0 ? 1.0 : powf(triangle_fatness(T), 0.5);
 	return fat_score * color_weight * area_score;
 }
 
@@ -34,9 +33,9 @@ int main(int argc, char** argv)
 	rng_seed(0);
 	splot_process(argv[1], &((struct config){
 		.levels = ((struct level[]) {
-			{ .n = 1000 , .w = 160 },
-			{ .n = 500  , .w = 400 , .r = 10 , .cn = 10.0 / 256.0 } ,
-			{ .n = 80  , .w = 0    , .r = 2  , .cn =  2.0 / 256.0 },
+			{ .n = 1000 , .w = 250 },
+			{ .n = 500  , .w = 500 , .r = 20 , .cn = 4.0 / 256.0 } ,
+			{ .n = 80  , .w = 0    , .r = 2  , .cn =  1.0 / 256.0 },
 			{ 0 },
 		}),
 	}));
