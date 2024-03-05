@@ -104,12 +104,22 @@ static inline double triangle_fatness(struct triangle t)
 	return 2.0 * (triangle_inradius(t) / triangle_circumradius(t));
 }
 
+enum mode {
+	MODE_POSITIVE = 0,
+	MODE_NEGATIVE,
+	MODE_ORIGINAL,
+	MODE_DUMMY,
+};
+
 static struct {
 	SDL_Window* window;
 	SDL_GLContext glctx;
 	int window_width;
 	int window_height;
 
+	enum mode mode;
+	int save_image;
+	int stretch;
 	unsigned frame_counter;
 	int max_batch_size_log2;
 
@@ -453,19 +463,9 @@ static void init(void)
 	}
 }
 
-enum mode {
-	MODE_POSITIVE = 0,
-	MODE_NEGATIVE,
-	MODE_ORIGINAL,
-	MODE_DUMMY,
-};
-
-static enum mode mode = MODE_POSITIVE;
-static int stretch = 0;
-static int frame_number;
 static int frame(void)
 {
-	if (frame_number > 0) SDL_GL_SwapWindow(g.window);
+	if (g.frame_counter > 0) SDL_GL_SwapWindow(g.window);
 
 	SDL_Event ev;
 	while (SDL_PollEvent(&ev)) {
@@ -477,11 +477,12 @@ static int frame(void)
 				int sym = ev.key.keysym.sym;
 				//int mod = ev.key.keysym.mod;
 				if (sym == SDLK_ESCAPE) return 0;
-				if (sym == '1') mode = MODE_POSITIVE;
-				if (sym == '2') mode = MODE_NEGATIVE;
-				if (sym == '3') mode = MODE_ORIGINAL;
-				if (sym == '4') mode = MODE_DUMMY;
-				if (sym == SDLK_SPACE) stretch = !stretch;
+				if (sym == '1') g.mode = MODE_POSITIVE;
+				if (sym == '2') g.mode = MODE_NEGATIVE;
+				if (sym == '3') g.mode = MODE_ORIGINAL;
+				if (sym == '4') g.mode = MODE_DUMMY;
+				if (sym == 's') g.save_image = 1;
+				if (sym == SDLK_SPACE) g.stretch = !g.stretch;
 				} break;
 			case SDL_MOUSEMOTION:
 				break;
@@ -499,8 +500,6 @@ static int frame(void)
 	glViewport(0, 0, g.window_width, g.window_height);
 	glClearColor(0, 0, 0, 0);
 	glClear(GL_COLOR_BUFFER_BIT);
-
-	frame_number++;
 
 	return 1;
 }
@@ -725,7 +724,7 @@ static void process_search(void)
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g.dummy_fb_tex, /*level=*/0); CHKGL;
 	assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
 	glViewport(0, 0, g.source_width, g.source_height);
-	if (mode == MODE_DUMMY) {
+	if (g.mode == MODE_DUMMY) {
 		glClearColor(0, 0, 0, 0);
 		glClear(GL_COLOR_BUFFER_BIT);
 	}
@@ -948,9 +947,48 @@ static void process_search(void)
 	}
 }
 
+static void do_save_texture(const char* prefix)
+{
+	char filename[1<<10];
+	snprintf(filename, sizeof filename, "%s_%d.ppm", prefix, g.frame_counter);
+
+	int width = -1;
+	int height = -1;
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width); CHKGL;
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height); CHKGL;
+	printf("write texture %dx%d\n", width, height);
+	assert(width > 0);
+	assert(height > 0);
+	assert(((width%4) == 0) && "TODO handle non-divisible-by-4 width");
+	const int n_pixels = width*height;
+	const int n_channels = 3;
+	uint8_t* data = malloc(n_channels*n_pixels);
+	GLenum format;
+	switch (n_channels) {
+	case 3: format = GL_RGB; break;
+	default: assert(!"unhandled value");
+	}
+	glGetTexImage(GL_TEXTURE_2D, 0, format, GL_UNSIGNED_BYTE, data); CHKGL;
+
+	FILE* f = fopen(filename, "w");
+	fprintf(f, "P3\n");
+	fprintf(f, "%d %d\n", width, height);
+	fprintf(f, "255\n");
+	uint8_t* p = data;
+	for (int i0 = 0; i0 < n_pixels; i0++) {
+		for (int i1 = 0; i1 < n_channels; i1++) {
+			uint8_t px = *(p++);
+			fprintf(f, "%s%d", i1 > 0 ? " " : "", (int)px);
+		}
+		fprintf(f, "\n");
+	}
+	fclose(f);
+	free(data);
+}
+
 static void process_draw(void)
 {
-	if (mode == MODE_POSITIVE) {
+	if (g.mode == MODE_POSITIVE) {
 		glBindFramebuffer(GL_FRAMEBUFFER, g.framebuffer); CHKGL;
 		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g.dummy_fb_tex, /*level=*/0); CHKGL;
 		assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
@@ -988,32 +1026,38 @@ static void process_draw(void)
 	glUseProgram(g.blit_prg); CHKGL;
 	glBindVertexArray(g.vao); CHKGL;
 
-	const float sw = stretch ? 1.0f : (float)g.source_width / (float)g.window_width;
-	const float sh = stretch ? 1.0f : (float)g.source_height / (float)g.window_height;
+	const float sw = g.stretch ? 1.0f : (float)g.source_width / (float)g.window_width;
+	const float sh = g.stretch ? 1.0f : (float)g.source_height / (float)g.window_height;
 
-	switch (mode) {
+	switch (g.mode) {
 	case MODE_POSITIVE:
 		glBindTexture(GL_TEXTURE_2D, g.dummy_fb_tex); CHKGL;
+		if (g.save_image) do_save_texture("positive");
 		glUniform2f(g.blit_uloc_offset, 0.0f, 0.0f); CHKGL;
 		glUniform2f(g.blit_uloc_scale, sw, sh); CHKGL;
 		break;
 	case MODE_NEGATIVE:
 		glBindTexture(GL_TEXTURE_2D, g.canvas_tex); CHKGL;
+		if (g.save_image) do_save_texture("negative");
 		glUniform2f(g.blit_uloc_offset, 0.0f, 0.0f); CHKGL;
 		glUniform2f(g.blit_uloc_scale, -sw, -sh); CHKGL;
 		break;
 	case MODE_ORIGINAL:
 		glBindTexture(GL_TEXTURE_2D, g.original_tex); CHKGL;
+		if (g.save_image) do_save_texture("original");
 		glUniform2f(g.blit_uloc_offset, 0.0f, 0.0f); CHKGL;
 		glUniform2f(g.blit_uloc_scale, -sw, -sh); CHKGL;
 		break;
 	case MODE_DUMMY:
 		glBindTexture(GL_TEXTURE_2D, g.dummy_fb_tex); CHKGL;
+		if (g.save_image) do_save_texture("dummy");
 		glUniform2f(g.blit_uloc_offset, 0.0f, 0.0f); CHKGL;
 		glUniform2f(g.blit_uloc_scale, -sw, -sh); CHKGL;
 		break;
 	default: assert(!"unhandled mode");
 	}
+	g.save_image = 0;
+
 	glUniform1i(g.blit_uloc_tex, 0);
 	glDisable(GL_BLEND);
 	glDrawArrays(GL_TRIANGLES, 0, 6); CHKGL;
@@ -1446,12 +1490,12 @@ static void splot_process(const char* image_path, struct config* config)
 	g.level_index = -1;
 
 	while (frame()) {
-		g.frame_counter++;
 		const int n_searches_per_draw = 4; // CFG
 		for (int i = 0; i < n_searches_per_draw; i++) {
 			process_search();
 		}
 		process_draw();
+		g.frame_counter++;
 	}
 }
 
