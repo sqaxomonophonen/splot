@@ -647,16 +647,8 @@ static void process_search(void)
 					*(vp++) = px;
 					*(vp++) = py;
 					*(vp++) = batch_index;
-					const double gs = (65535.0 * lvl->gn);
-					const double cs = (65535.0 * lvl->cn);
-					const double gn = gs == 0.0 ? 0.0 : rng_nextf() * gs - gs*0.5;
 					for (int i = 0; i < g.source_n_channels; i++) {
-						int c = g.winner_triangle[of+2+i];
-						c += gn;
-						if (cs != 0.0) c += rng_nextf() * cs - cs*0.5;
-						if (c < 0) c = 0;
-						if (c > 65535) c = 65535;
-						*(vp++) = c;
+						*(vp++) = g.winner_triangle[of+2+i];
 					}
 				}
 			}
@@ -664,22 +656,34 @@ static void process_search(void)
 			const int nt = get_n_trial_elems();
 
 			double grays[] = {0,0,0};
+			const double gs = (65535.0 * lvl->gn);
+			const double cs = (65535.0 * lvl->cn);
+			const double gn = gs == 0.0 ? 0.0 : rng_nextf() * gs - gs*0.5;
 			for (int point = 0; point < 3; point++) {
-				double v;
 				uint16_t* vp = &v0[point*nt+3];
+				for (int i = 0; i < g.source_n_channels; i++) {
+					int c = vp[i];
+					c += gn;
+					if (cs != 0.0) c += rng_nextf() * cs - cs*0.5;
+					if (c < 0) c = 0;
+					if (c > 65535) c = 65535;
+					vp[i] = c;
+				}
+
+				double gray;
 				switch (g.source_n_channels) {
 				case 1:
-					v = (double)vp[0] * (1.0 / 65536.0);
+					gray = (double)vp[0] * (1.0 / 65536.0);
 					break;
 				case 3:
-					v = (
+					gray = (
 						  (double)vp[0] * (double)RED10K
 						+ (double)vp[1] * (double)GREEN10K
 						+ (double)vp[2] * (double)BLUE10K
 						) * (1.0 / (65536.0 * 10000.0));
 					break;
 				case 4:
-					v = (
+					gray = (
 						  (double)vp[0] * (double)RED10K
 						+ (double)vp[1] * (double)GREEN10K
 						+ (double)vp[2] * (double)BLUE10K
@@ -688,7 +692,7 @@ static void process_search(void)
 					break;
 				default: assert(!"unhandled value");
 				}
-				grays[point] = v;
+				grays[point] = gray;
 			}
 
 			assert((vp-v0) == 3*nt);
@@ -1437,7 +1441,7 @@ static void splot_process(const char* image_path, struct config* config)
 
 	while (frame()) {
 		g.frame_counter++;
-		const int n_searches_per_draw = 10; // CFG
+		const int n_searches_per_draw = 4; // CFG
 		for (int i = 0; i < n_searches_per_draw; i++) {
 			process_search();
 		}
