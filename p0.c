@@ -9,8 +9,10 @@ static uint16_t candidate_component(uint16_t src_pixel, uint16_t canvas_pixel)
 	return p;
 }
 
-static int accept_triangle(struct triangle T)
+static int accept_triangle(struct triangle T, const double* grays)
 {
+	const double thr = 1.0 / 512.0;
+	if (grays[0] < thr && grays[1] < thr && grays[2] < thr) return 0;
 	const double area_ratio = triangle_area(T) / source_area();
 	if (area_ratio > 1.0 / (6.0*6.0)) return 0;
 	if (triangle_fatness(T) < 0.005) return 0;

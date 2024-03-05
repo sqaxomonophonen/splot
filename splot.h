@@ -505,7 +505,7 @@ static int frame(void)
 }
 
 static uint16_t candidate_component(uint16_t src_pixel, uint16_t canvas_pixel);
-static int accept_triangle(struct triangle);
+static int accept_triangle(struct triangle, const double* grays);
 static double score_candidate(struct triangle, double canvas_color_weight, double vertex_color_weight);
 
 static void process_search(void)
@@ -661,13 +661,33 @@ static void process_search(void)
 
 			const int nt = get_n_trial_elems();
 
-			int64_t csum = 0;
+			double grays[] = {0,0,0};
 			for (int point = 0; point < 3; point++) {
-				for (int i = 0; i < g.source_n_channels; i++) {
-					csum += v0[point*nt+3+i];
+				double v;
+				uint16_t* vp = &v0[point*nt+3];
+				switch (g.source_n_channels) {
+				case 1:
+					v = (double)vp[0] * (1.0 / 65536.0);
+					break;
+				case 3:
+					v = (
+						  (double)vp[0] * (double)RED10K
+						+ (double)vp[1] * (double)GREEN10K
+						+ (double)vp[2] * (double)BLUE10K
+						) * (1.0 / (65536.0 * 10000.0));
+					break;
+				case 4:
+					v = (
+						  (double)vp[0] * (double)RED10K
+						+ (double)vp[1] * (double)GREEN10K
+						+ (double)vp[2] * (double)BLUE10K
+						+ (double)vp[3] * (double)ALPHA10K
+						) * (1.0 / (65536.0 * 20000.0));
+					break;
+				default: assert(!"unhandled value");
 				}
+				grays[point] = v;
 			}
-			if (csum == 0) continue;
 
 			assert((vp-v0) == 3*nt);
 			struct triangle T = mk_triangle(
@@ -688,7 +708,7 @@ static void process_search(void)
 				signed_area = triangle_area(T);
 			}
 			assert(signed_area >= 0.0);
-			if (accept_triangle(T)) break;
+			if (accept_triangle(T, grays)) break;
 		}
 	}
 	const int batch_size = batch_index;
