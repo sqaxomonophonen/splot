@@ -583,8 +583,7 @@ static void process_search(void)
 				for (int point = 0; point < 3; point++) {
 					assert(g.canvas_sum > 0);
 					int idx, px, py;
-					//if (attempt < max_attempts/2) { // CFG?
-					if (0) {
+					if (attempt < max_attempts/2) { // CFG?
 						uint64_t find = rng_next() % g.canvas_sum;
 
 						int left = 0;
@@ -903,6 +902,10 @@ static void process_search(void)
 				glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
 				glBindVertexArray(0); CHKGL;
 				glUseProgram(0); CHKGL;
+
+				glBindTexture(GL_TEXTURE_2D, g.canvas_tex); CHKGL;
+				glGenerateMipmap(GL_TEXTURE_2D); CHKGL;
+				glBindTexture(GL_TEXTURE_2D, 0); CHKGL;
 			}
 		}
 	}
@@ -1407,7 +1410,7 @@ static void splot_process(const char* image_path, struct config* config)
 
 	while (frame()) {
 		g.frame_counter++;
-		const int n_searches_per_draw = 5; // CFG
+		const int n_searches_per_draw = 10; // CFG
 		for (int i = 0; i < n_searches_per_draw; i++) {
 			process_search();
 		}

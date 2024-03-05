@@ -2,7 +2,7 @@
 
 static uint16_t candidate_component(uint16_t src_pixel, uint16_t canvas_pixel)
 {
-	int p = (int)src_pixel >> 4;
+	int p = (int)src_pixel >> 3;
 	int cp = (int)canvas_pixel - 1;
 	if (cp < 0) cp = 0;
 	if (p > cp) p = cp;
@@ -30,12 +30,12 @@ static double score_candidate(struct triangle T, double canvas_color_weight, dou
 
 int main(int argc, char** argv)
 {
-	rng_seed(0);
+	rng_seed(1);
 	splot_process(argv[1], &((struct config){
 		.levels = ((struct level[]) {
-			{ .n = 1000 , .w = 250 },
-			{ .n = 500  , .w = 500 , .r = 20 , .cn = 4.0 / 256.0 } ,
-			{ .n = 80  , .w = 0    , .r = 2  , .cn =  1.0 / 256.0 },
+			{ .n = 2000 , .w = 200 },
+			{ .n = 200  , .w = 500 , .r = 30 , .cn = 10.0 / 256.0 } ,
+			{ .n = 20  , .w = 0    , .r = 2  , .cn =  2.0 / 256.0 },
 			{ 0 },
 		}),
 	}));
