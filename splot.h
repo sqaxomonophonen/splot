@@ -155,6 +155,7 @@ static struct {
 
 	enum mode mode;
 	int save_image;
+	int save_minsamps;
 	int stretch;
 	unsigned frame_counter;
 	int max_batch_size_log2;
@@ -307,6 +308,11 @@ static inline int get_n_levels(void)
 	int n_levels = 0;
 	for (struct level* l = g.config->levels; l->n; l++, n_levels++) {};
 	return n_levels;
+}
+
+static inline int get_n_minsamps(void)
+{
+	return get_n_levels() - 1;
 }
 
 static inline struct level* get_current_level(void)
@@ -466,10 +472,14 @@ static GLuint mk_render_program(int n_vertex_sources, int n_fragment_sources, co
 	return program;
 }
 
-static void do_save_texture(const char* prefix)
+static void do_save_texture_ex(const char* prefix, int id2)
 {
 	char filename[1<<10];
-	snprintf(filename, sizeof filename, "%s_%d.ppm", prefix, g.frame_counter);
+	if (id2 >= 0) {
+		snprintf(filename, sizeof filename, "%s_%d_%d.ppm", prefix, get_tri_num(), id2);
+	} else {
+		snprintf(filename, sizeof filename, "%s_%d.ppm", prefix, get_tri_num());
+	}
 
 	int width = -1;
 	int height = -1;
@@ -503,6 +513,11 @@ static void do_save_texture(const char* prefix)
 	}
 	fclose(f);
 	free(data);
+}
+
+static void do_save_texture(const char* prefix)
+{
+	do_save_texture_ex(prefix, -1);
 }
 
 static void init(void)
@@ -568,6 +583,7 @@ static int frame(void)
 				if (sym == '3') g.mode = MODE_ORIGINAL;
 				if (sym == '4') g.mode = MODE_DUMMY;
 				if (sym == 's') g.save_image = 1;
+				if (sym == 'm') g.save_minsamps = 1;
 				if (sym == SDLK_SPACE) g.stretch = !g.stretch;
 				} break;
 			case SDL_MOUSEMOTION:
@@ -636,6 +652,17 @@ static void process_search(void)
 {
 	stat_tick();
 
+	if (g.save_minsamps) {
+		const int n_minsamp = get_n_minsamps();
+		for (int i = 0; i < n_minsamp; i++) {
+			glBindTexture(GL_TEXTURE_2D, g.minsamp_texs[i]); CHKGL;
+			do_save_texture_ex("minsamp", i);
+		}
+		glBindTexture(GL_TEXTURE_2D, g.canvas_tex); CHKGL;
+		do_save_texture_ex("minsamp", n_minsamp);
+	}
+	g.save_minsamps = 0;
+
 	if (g.n_trials_remaining == 0) {
 		const int n_levels = get_n_levels();
 		g.level_index = (g.level_index + 1) % n_levels;
@@ -647,7 +674,7 @@ static void process_search(void)
 		if (g.level_index == 0) {
 			g.stat.n_lvl0s++;
 
-			const int n_minsamp = n_levels-1;
+			const int n_minsamp = get_n_minsamps();
 			if (n_minsamp > 0) {
 				assert(g.minsamp_texs != NULL);
 				glUseProgram(g.minsamp_prg); CHKGL;
@@ -668,17 +695,6 @@ static void process_search(void)
 					glEnable(GL_BLEND);
 				}
 				glUseProgram(0); CHKGL;
-				#if 0
-				for (int i = 0; i < n_minsamp; i++) {
-					glBindTexture(GL_TEXTURE_2D, g.minsamp_texs[i]); CHKGL;
-					char buf[1<<10];
-					snprintf(buf, sizeof buf, "minsamp%d", i);
-					do_save_texture(buf);
-				}
-				glBindTexture(GL_TEXTURE_2D, g.canvas_tex); CHKGL;
-				do_save_texture("minsampX");
-				//exit(1);
-				#endif
 			}
 
 			// download canvas, and use it to construct new binary searchable
