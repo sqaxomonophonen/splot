@@ -1734,7 +1734,7 @@ static void splot_process(const char* image_path, struct config* config)
 	stat_tick();
 
 	while (frame()) {
-		const int n_searches_per_draw = 4; // CFG
+		const int n_searches_per_draw = 1; // CFG
 		for (int i = 0; i < n_searches_per_draw; i++) {
 			process_search();
 		}
