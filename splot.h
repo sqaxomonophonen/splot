@@ -146,6 +146,7 @@ struct stat {
 	int n_accepted;
 };
 
+
 static struct {
 	SDL_Window* window;
 	SDL_GLContext glctx;
@@ -161,14 +162,15 @@ static struct {
 	GLuint framebuffer;
 	GLuint vao;
 	GLuint canvas_tex;
+	GLuint* minsamp_texs;
 	GLuint original_tex;
 	GLenum source_format;
 	GLuint dummy_fb_tex;
-	GLuint trial_prg, present_prg, paint_prg, blit_prg;
 	GLuint signal_buf;
 	GLuint paint_vbo;
 	GLuint trial_vbo;
 
+	GLuint trial_prg;
 	GLint trial_uloc_pos_scale;
 	GLint trial_uloc_uv_scale;
 	GLint trial_uloc_canvas_tex;
@@ -176,18 +178,26 @@ static struct {
 	GLint trial_aloc_signal;
 	GLint trial_aloc_color;
 
+	GLuint paint_prg;
 	GLint paint_uloc_scale;
 	GLint paint_aloc_pos;
 	GLint paint_aloc_color;
 
+	GLuint present_prg;
 	GLint present_uloc_scale;
 	GLint present_uloc_frame;
 	GLint present_aloc_pos;
 	GLint present_aloc_color;
 
+	GLuint blit_prg;
 	GLint blit_uloc_offset;
 	GLint blit_uloc_scale;
 	GLint blit_uloc_tex;
+
+	GLuint minsamp_prg;
+	GLint minsamp_uloc_srcdim;
+	GLint minsamp_uloc_dstdim;
+	GLint minsamp_uloc_tex;
 
 	struct xoshiro256 rng;
 
@@ -456,6 +466,45 @@ static GLuint mk_render_program(int n_vertex_sources, int n_fragment_sources, co
 	return program;
 }
 
+static void do_save_texture(const char* prefix)
+{
+	char filename[1<<10];
+	snprintf(filename, sizeof filename, "%s_%d.ppm", prefix, g.frame_counter);
+
+	int width = -1;
+	int height = -1;
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width); CHKGL;
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height); CHKGL;
+	printf("write texture %dx%d\n", width, height);
+	assert(width > 0);
+	assert(height > 0);
+	assert(((width%4) == 0) && "TODO handle non-divisible-by-4 width");
+	const int n_pixels = width*height;
+	const int n_channels = 3;
+	uint8_t* data = malloc(n_channels*n_pixels);
+	GLenum format;
+	switch (n_channels) {
+	case 3: format = GL_RGB; break;
+	default: assert(!"unhandled value");
+	}
+	glGetTexImage(GL_TEXTURE_2D, 0, format, GL_UNSIGNED_BYTE, data); CHKGL;
+
+	FILE* f = fopen(filename, "w");
+	fprintf(f, "P3\n");
+	fprintf(f, "%d %d\n", width, height);
+	fprintf(f, "255\n");
+	uint8_t* p = data;
+	for (int i0 = 0; i0 < n_pixels; i0++) {
+		for (int i1 = 0; i1 < n_channels; i1++) {
+			uint8_t px = *(p++);
+			fprintf(f, "%s%d", i1 > 0 ? " " : "", (int)px);
+		}
+		fprintf(f, "\n");
+	}
+	fclose(f);
+	free(data);
+}
+
 static void init(void)
 {
 	assert(SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO) == 0);
@@ -553,7 +602,7 @@ static void stat_tick(void)
 		g.stat._init = 1;
 	}
 	const double dt = DIFF(now, g.stat.t0);
-	if (dt < 0.2) return;
+	if (dt < 1.0) return;
 
 	printf("STATISTICS frame=%d tri %d\n", g.frame_counter, get_tri_num());
 	#define ST(N) \
@@ -574,6 +623,15 @@ static void stat_tick(void)
 	g.stat.t0 = now;
 }
 
+static inline int get_minsamp_dim(int index, int* pw, int* ph)
+{
+	const int w = g.config->levels[index].w;
+	assert(w > 0);
+	const int h = (g.source_height * w + g.source_width-1) / g.source_width;
+	if (pw) *pw = w;
+	if (ph) *ph = h;
+}
+
 static void process_search(void)
 {
 	stat_tick();
@@ -588,9 +646,45 @@ static void process_search(void)
 
 		if (g.level_index == 0) {
 			g.stat.n_lvl0s++;
+
+			const int n_minsamp = n_levels-1;
+			if (n_minsamp > 0) {
+				assert(g.minsamp_texs != NULL);
+				glUseProgram(g.minsamp_prg); CHKGL;
+				glBindFramebuffer(GL_FRAMEBUFFER, g.framebuffer); CHKGL;
+				glBindVertexArray(g.vao); CHKGL;
+				for (int i = 0; i < n_minsamp; i++) {
+					glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g.minsamp_texs[i], /*level=*/0); CHKGL;
+					assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+					int w,h;
+					get_minsamp_dim(i, &w, &h);
+					glViewport(0, 0, w, h); CHKGL;
+					glUniform2f(g.minsamp_uloc_dstdim, w, h); CHKGL;
+					glUniform2f(g.minsamp_uloc_srcdim, g.source_width, g.source_height); CHKGL;
+					glUniform1i(g.minsamp_uloc_tex, 0); CHKGL;
+					glBindTexture(GL_TEXTURE_2D, g.canvas_tex); CHKGL;
+					glDisable(GL_BLEND);
+					glDrawArrays(GL_TRIANGLES, 0, 6); CHKGL;
+					glEnable(GL_BLEND);
+				}
+				glUseProgram(0); CHKGL;
+				#if 0
+				for (int i = 0; i < n_minsamp; i++) {
+					glBindTexture(GL_TEXTURE_2D, g.minsamp_texs[i]); CHKGL;
+					char buf[1<<10];
+					snprintf(buf, sizeof buf, "minsamp%d", i);
+					do_save_texture(buf);
+				}
+				glBindTexture(GL_TEXTURE_2D, g.canvas_tex); CHKGL;
+				do_save_texture("minsampX");
+				//exit(1);
+				#endif
+			}
+
 			// download canvas, and use it to construct new binary searchable
 			// table for weighted pixel picking
 			glBindTexture(GL_TEXTURE_2D, g.canvas_tex); CHKGL;
+
 			{
 				int tw, th;
 				glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tw);
@@ -830,8 +924,15 @@ static void process_search(void)
 	glVertexAttribPointer(g.trial_aloc_signal, 1, GL_UNSIGNED_SHORT, GL_FALSE, get_trial_stride(), (void*)4); CHKGL;
 	glVertexAttribPointer(g.trial_aloc_color,  g.source_n_channels, GL_UNSIGNED_SHORT, GL_TRUE,  get_trial_stride(), (void*)6); CHKGL;
 
-
-	glBindTexture(GL_TEXTURE_2D, g.canvas_tex); CHKGL;
+	GLuint trial_tex;
+	if (g.level_index < (get_n_levels() - 1)) {
+		assert(g.level_index >= 0);
+		trial_tex = g.minsamp_texs[g.level_index];
+	} else {
+		assert(g.level_index == (get_n_levels() - 1));
+		trial_tex = g.canvas_tex;
+	}
+	glBindTexture(GL_TEXTURE_2D, trial_tex); CHKGL;
 	const double sx = 65535.0f / (float)g.source_width;
 	const double sy = 65535.0f / (float)g.source_height;
 	glUniform2f(g.trial_uloc_pos_scale,
@@ -1021,52 +1122,9 @@ static void process_search(void)
 				glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
 				glBindVertexArray(0); CHKGL;
 				glUseProgram(0); CHKGL;
-
-				glBindTexture(GL_TEXTURE_2D, g.canvas_tex); CHKGL;
-				glGenerateMipmap(GL_TEXTURE_2D); CHKGL;
-				glBindTexture(GL_TEXTURE_2D, 0); CHKGL;
 			}
 		}
 	}
-}
-
-static void do_save_texture(const char* prefix)
-{
-	char filename[1<<10];
-	snprintf(filename, sizeof filename, "%s_%d.ppm", prefix, g.frame_counter);
-
-	int width = -1;
-	int height = -1;
-	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width); CHKGL;
-	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height); CHKGL;
-	printf("write texture %dx%d\n", width, height);
-	assert(width > 0);
-	assert(height > 0);
-	assert(((width%4) == 0) && "TODO handle non-divisible-by-4 width");
-	const int n_pixels = width*height;
-	const int n_channels = 3;
-	uint8_t* data = malloc(n_channels*n_pixels);
-	GLenum format;
-	switch (n_channels) {
-	case 3: format = GL_RGB; break;
-	default: assert(!"unhandled value");
-	}
-	glGetTexImage(GL_TEXTURE_2D, 0, format, GL_UNSIGNED_BYTE, data); CHKGL;
-
-	FILE* f = fopen(filename, "w");
-	fprintf(f, "P3\n");
-	fprintf(f, "%d %d\n", width, height);
-	fprintf(f, "255\n");
-	uint8_t* p = data;
-	for (int i0 = 0; i0 < n_pixels; i0++) {
-		for (int i1 = 0; i1 < n_channels; i1++) {
-			uint8_t px = *(p++);
-			fprintf(f, "%s%d", i1 > 0 ? " " : "", (int)px);
-		}
-		fprintf(f, "\n");
-	}
-	fclose(f);
-	free(data);
 }
 
 static void process_draw(void)
@@ -1160,6 +1218,11 @@ static void splot_process(const char* image_path, struct config* config)
 {
 	g.config = config;
 
+	{
+		assert(get_n_levels() > 0);
+		assert((config->levels[get_n_levels()-1].w == 0) && "last level must be source width");
+	}
+
 	init();
 
 	assert(image_path != NULL);
@@ -1203,14 +1266,34 @@ static void splot_process(const char* image_path, struct config* config)
 		GLuint* tp = tex == 0 ? &g.canvas_tex : tex == 1 ? &g.original_tex : NULL;
 		glGenTextures(1, tp); CHKGL;
 		glBindTexture(GL_TEXTURE_2D, *tp); CHKGL;
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); CHKGL;
+		//glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); CHKGL;
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); CHKGL;
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST); CHKGL;
 		assert((((g.source_width*pixel_size) & 3) == 0) && "FIXME unaligned rows; use glPixelStorei(GL_UNPACK_ALIGNMENT, 1)?");
 		const GLvoid* data = g.source_image;
 		glTexImage2D(GL_TEXTURE_2D, /*level=*/0, internal_format, g.source_width, g.source_height, /*border=*/0, g.source_format, GL_UNSIGNED_SHORT, data); CHKGL;
-		glGenerateMipmap(GL_TEXTURE_2D); CHKGL;
+		//glGenerateMipmap(GL_TEXTURE_2D); CHKGL;
 		glBindTexture(GL_TEXTURE_2D, 0); CHKGL;
 	}
+
+	const int n_levels = get_n_levels();
+	const int n_minsamp = n_levels-1;
+	if (n_minsamp > 0) {
+		if (g.minsamp_texs == NULL) {
+			g.minsamp_texs = malloc(n_minsamp * sizeof *g.minsamp_texs);
+			for (int i = 0; i < n_minsamp; i++) {
+				GLuint* tex = &g.minsamp_texs[i];
+				glGenTextures(1, tex);
+				glBindTexture(GL_TEXTURE_2D, *tex); CHKGL;
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); CHKGL;
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST); CHKGL;
+				int w,h;
+				get_minsamp_dim(i, &w, &h);
+				glTexImage2D(GL_TEXTURE_2D, /*level=*/0, internal_format, w, h, /*border=*/0, g.source_format, GL_UNSIGNED_SHORT, NULL); CHKGL;
+			}
+		}
+	}
+	glBindTexture(GL_TEXTURE_2D, 0); CHKGL;
 
 	glGenFramebuffers(1, &g.framebuffer); CHKGL;
 
@@ -1566,6 +1649,67 @@ static void splot_process(const char* image_path, struct config* config)
 	g.trial_aloc_pos    = glGetAttribLocation(g.trial_prg, "a_pos");
 	g.trial_aloc_signal = glGetAttribLocation(g.trial_prg, "a_signal");
 	g.trial_aloc_color  = glGetAttribLocation(g.trial_prg, "a_color");
+
+	const char* minsamp_sources[] = {
+	// vertex
+	"#version 460\n"
+	"\n"
+	"out vec2 v_uv;\n"
+	"\n"
+	"void main()\n"
+	"{\n"
+	"	vec2 c;\n"
+	"	if (" IS_Q0 ") {\n"
+	"		c = vec2(-1.0, -1.0);\n"
+	"		v_uv = vec2(0.0, 0.0);\n"
+	"	} else if (" IS_Q1 ") {\n"
+	"		c = vec2( 1.0, -1.0);\n"
+	"		v_uv = vec2(1.0, 0.0);\n"
+	"	} else if (" IS_Q2 ") {\n"
+	"		c = vec2( 1.0,  1.0);\n"
+	"		v_uv = vec2(1.0, 1.0);\n"
+	"	} else if (" IS_Q3 ") {\n"
+	"		c = vec2(-1.0,  1.0);\n"
+	"		v_uv = vec2(0.0, 1.0);\n"
+	"	}\n"
+	"	gl_Position = vec4(c, 0.0, 1.0);\n"
+	"}\n"
+	,
+	// fragment
+	"#version 460\n"
+	"\n"
+	"layout (location = 0) uniform vec2 u_srcdim;\n"
+	"layout (location = 1) uniform vec2 u_dstdim;\n"
+	"layout (location = 2) uniform sampler2D u_tex;\n"
+	"\n"
+	"in vec2 v_uv;\n"
+	"\n"
+	"layout (location = 0) out vec4 frag_color;\n"
+	"\n"
+	"vec2 snap(vec2 v)\n"
+	"{\n"
+	"	return floor(v * u_dstdim) / u_dstdim;\n"
+	"}\n"
+	"\n"
+	"void main()\n"
+	"{\n"
+	"	vec2 p0 = snap(v_uv);\n"
+	"	vec2 p1 = p0 + vec2(1.0/u_dstdim.x, 1.0/u_dstdim.y);\n"
+	"	vec2 d = vec2(1.0/u_srcdim.x, 1.0/u_srcdim.y);\n"
+	"	vec4 v = vec4(1.0, 1.0, 1.0, 1.0);\n"
+	"	for (float y = p0.y; y < p1.y; y += d.y) {\n"
+	"		for (float x = p0.x; x < p1.x; x += d.x) {\n"
+	"			v = min(v, texture(u_tex, vec2(x,y)));\n"
+	"		}\n"
+	"	}\n"
+	"	frag_color = v;\n"
+	"}\n"
+	};
+
+	g.minsamp_prg = mk_render_program(1, 1, minsamp_sources);
+	g.minsamp_uloc_srcdim = glGetUniformLocation(g.minsamp_prg, "u_srcdim");
+	g.minsamp_uloc_dstdim = glGetUniformLocation(g.minsamp_prg, "u_dstdim");
+	g.minsamp_uloc_tex = glGetUniformLocation(g.minsamp_prg, "u_tex");
 
 	//glDisable(GL_CULL_FACE); CHKGL;
 	glEnable(GL_BLEND); CHKGL;
