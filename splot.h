@@ -10,6 +10,8 @@ struct level {
 };
 
 struct config {
+	const char* image_path;
+	const char* work_path;
 	struct level* levels;
 };
 
@@ -44,7 +46,6 @@ static inline double DIFF(TIME ta, TIME tb)
 #include "xoshiro256plusplus.h"
 
 #include <SDL.h>
-
 
 struct vec2 { double x,y; };
 struct triangle { struct vec2 A,B,C; };
@@ -125,6 +126,12 @@ static inline double triangle_fatness(struct triangle t)
 	return 2.0 * (triangle_inradius(t) / triangle_circumradius(t));
 }
 
+enum {
+	TRIANGLE_GRAY = 0x11,
+	TRIANGLE_RGB  = 0x13,
+	TRIANGLE_RGBA = 0x14,
+};
+
 enum mode {
 	MODE_POSITIVE = 0,
 	MODE_NEGATIVE,
@@ -146,7 +153,6 @@ struct stat {
 	int n_accepted;
 };
 
-
 static struct {
 	SDL_Window* window;
 	SDL_GLContext glctx;
@@ -156,6 +162,7 @@ static struct {
 	enum mode mode;
 	int save_image;
 	int save_minsamps;
+	int save_work;
 	int stretch;
 	unsigned frame_counter;
 	int max_batch_size_log2;
@@ -220,6 +227,7 @@ static struct {
 	uint16_t best_triangle_elems[3*6];
 
 	uint16_t* chosen_vs;
+	int chosen_vs_render_cursor;
 
 	int source_width;
 	int source_height;
@@ -584,6 +592,7 @@ static int frame(void)
 				if (sym == '4') g.mode = MODE_DUMMY;
 				if (sym == 's') g.save_image = 1;
 				if (sym == 'm') g.save_minsamps = 1;
+				if (sym == 'w') g.save_work = 1;
 				if (sym == SDLK_SPACE) g.stretch = !g.stretch;
 				} break;
 			case SDL_MOUSEMOTION:
@@ -648,9 +657,71 @@ static inline int get_minsamp_dim(int index, int* pw, int* ph)
 	if (ph) *ph = h;
 }
 
+#define WORK_MAGIC ((uint16_t)(0x1980))
+
+static void do_save_work(void)
+{
+	char filename[1<<10];
+	snprintf(filename, sizeof filename, "work_%d.soup", get_tri_num());
+	FILE* f = fopen(filename, "wb");
+	uint16_t typ = g.source_n_channels + 0x10; // XXX 0x10 could mean "triangles"
+	uint16_t header[] = { WORK_MAGIC, typ };
+	assert(fwrite(header, sizeof header, 1, f) == 1);
+	assert(fwrite(g.chosen_vs, arrlen(g.chosen_vs)*sizeof(g.chosen_vs[0]), 1, f) == 1);
+	fclose(f);
+}
+
+static void update_canvas(void)
+{
+	if (g.chosen_vs_render_cursor >= arrlen(g.chosen_vs)) return;
+
+	glBindBuffer(GL_ARRAY_BUFFER, g.paint_vbo); CHKGL;
+	const size_t blitsz = sizeof(g.chosen_vs[0]) * arrlen(g.chosen_vs);
+	assert(blitsz <= paint_vbo_sz);
+	glBufferSubData(GL_ARRAY_BUFFER, 0, blitsz, g.chosen_vs); CHKGL;
+	glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
+
+	glBindFramebuffer(GL_FRAMEBUFFER, g.framebuffer); CHKGL;
+	glViewport(0, 0, g.source_width, g.source_height);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g.canvas_tex, /*level=*/0); CHKGL;
+	assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+	glUseProgram(g.paint_prg); CHKGL;
+	glBindVertexArray(g.vao); CHKGL;
+	glBindBuffer(GL_ARRAY_BUFFER, g.paint_vbo); CHKGL;
+	glEnableVertexAttribArray(g.paint_aloc_pos); CHKGL;
+	glEnableVertexAttribArray(g.paint_aloc_color); CHKGL;
+
+	glVertexAttribPointer(g.paint_aloc_pos, 2, GL_UNSIGNED_SHORT, GL_TRUE, get_paint_stride(), (void*)0); CHKGL;
+	glVertexAttribPointer(g.paint_aloc_color,  g.source_n_channels, GL_UNSIGNED_SHORT, GL_TRUE,  get_paint_stride(), (void*)4); CHKGL;
+	glUniform2f(g.paint_uloc_scale, 65536.0f / (float)g.source_width, 65536.0f / (float)g.source_height); CHKGL;
+
+	glBlendFunc(GL_ONE, GL_ONE); CHKGL;
+	glBlendEquation(GL_FUNC_REVERSE_SUBTRACT); CHKGL;
+
+	//glDrawArrays(GL_TRIANGLES, arrlen(g.chosen_vs)/get_n_paint_elems()-3, 3); CHKGL;
+	const int n = arrlen(g.chosen_vs);
+	const int npe = get_n_paint_elems();
+	assert((n % npe) == 0);
+	assert((g.chosen_vs_render_cursor % npe) == 0);
+	const GLint first = g.chosen_vs_render_cursor / npe;
+	const GLsizei count = (n / npe) - first;
+	glDrawArrays(GL_TRIANGLES, first, count); CHKGL;
+	g.chosen_vs_render_cursor = arrlen(g.chosen_vs);
+	glBlendEquation(GL_FUNC_ADD); CHKGL;
+
+	glDisableVertexAttribArray(g.paint_aloc_color); CHKGL;
+	glDisableVertexAttribArray(g.paint_aloc_pos); CHKGL;
+	glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
+	glBindVertexArray(0); CHKGL;
+	glUseProgram(0); CHKGL;
+}
+
 static void process_search(void)
 {
 	stat_tick();
+
+	if (g.save_work) do_save_work();
+	g.save_work = 0;
 
 	if (g.save_minsamps) {
 		const int n_minsamp = get_n_minsamps();
@@ -1103,41 +1174,10 @@ static void process_search(void)
 			if (!is_final_level) {
 				memcpy(g.winner_triangle, g.best_triangle_elems, psz);
 			} else {
-				// store triangle, update canvas
+				// store triangle
 				uint16_t* vout = arraddnptr(g.chosen_vs, ncp);
 				memcpy(vout, g.best_triangle_elems, psz);
-
-				glBindBuffer(GL_ARRAY_BUFFER, g.paint_vbo); CHKGL;
-				const size_t blitsz = sizeof(g.chosen_vs[0]) * arrlen(g.chosen_vs);
-				assert(blitsz <= paint_vbo_sz);
-				glBufferSubData(GL_ARRAY_BUFFER, 0, blitsz, g.chosen_vs); CHKGL;
-				glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
-
-				glBindFramebuffer(GL_FRAMEBUFFER, g.framebuffer); CHKGL;
-				glViewport(0, 0, g.source_width, g.source_height);
-				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g.canvas_tex, /*level=*/0); CHKGL;
-				assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
-				glUseProgram(g.paint_prg); CHKGL;
-				glBindVertexArray(g.vao); CHKGL;
-				glBindBuffer(GL_ARRAY_BUFFER, g.paint_vbo); CHKGL;
-				glEnableVertexAttribArray(g.paint_aloc_pos); CHKGL;
-				glEnableVertexAttribArray(g.paint_aloc_color); CHKGL;
-
-				glVertexAttribPointer(g.paint_aloc_pos, 2, GL_UNSIGNED_SHORT, GL_TRUE, get_paint_stride(), (void*)0); CHKGL;
-				glVertexAttribPointer(g.paint_aloc_color,  g.source_n_channels, GL_UNSIGNED_SHORT, GL_TRUE,  get_paint_stride(), (void*)4); CHKGL;
-				glUniform2f(g.paint_uloc_scale, 65536.0f / (float)g.source_width, 65536.0f / (float)g.source_height); CHKGL;
-
-				glBlendFunc(GL_ONE, GL_ONE); CHKGL;
-				glBlendEquation(GL_FUNC_REVERSE_SUBTRACT); CHKGL;
-
-				glDrawArrays(GL_TRIANGLES, arrlen(g.chosen_vs)/get_n_paint_elems()-3, 3); CHKGL;
-				glBlendEquation(GL_FUNC_ADD); CHKGL;
-
-				glDisableVertexAttribArray(g.paint_aloc_color); CHKGL;
-				glDisableVertexAttribArray(g.paint_aloc_pos); CHKGL;
-				glBindBuffer(GL_ARRAY_BUFFER, 0); CHKGL;
-				glBindVertexArray(0); CHKGL;
-				glUseProgram(0); CHKGL;
+				update_canvas();
 			}
 		}
 	}
@@ -1230,7 +1270,7 @@ static void process_draw(void)
 #define IS_Q2 "(gl_VertexID == 2 || gl_VertexID == 4)"
 #define IS_Q3 "(gl_VertexID == 5)"
 
-static void splot_process(const char* image_path, struct config* config)
+static void splot_process(struct config* config)
 {
 	g.config = config;
 
@@ -1241,13 +1281,68 @@ static void splot_process(const char* image_path, struct config* config)
 
 	init();
 
-	assert(image_path != NULL);
-	g.source_image = stbi_load_16(image_path, &g.source_width, &g.source_height, &g.source_n_channels, 0);
+	assert(config->image_path != NULL);
+	g.source_image = stbi_load_16(config->image_path, &g.source_width, &g.source_height, &g.source_n_channels, 0);
 	if (g.source_image == NULL) {
-		fprintf(stderr, "%s: could not read\n", image_path);
+		fprintf(stderr, "%s: could not read\n", config->image_path);
 		exit(EXIT_FAILURE);
 	}
 	printf("%d×%dc%d\n", g.source_width, g.source_height, g.source_n_channels);
+
+	if (config->work_path != NULL) {
+		FILE* f = fopen(config->work_path, "rb");
+		uint16_t header[2];
+		if (fread(header, sizeof header, 1, f) != 1) {
+			fprintf(stderr, "%s: could not read\n", config->work_path);
+			fclose(f);
+			exit(EXIT_FAILURE);
+		}
+		if (header[0] != WORK_MAGIC) {
+			fprintf(stderr, "%s: not a work file (missing magic)\n", config->work_path);
+			fclose(f);
+			exit(EXIT_FAILURE);
+		}
+
+		int n_channels = -1;
+		int tuple_sz = -1;
+		switch (header[1]) {
+		case TRIANGLE_GRAY:
+			n_channels = 1;
+			tuple_sz = 3 * (2 + n_channels);
+			break;
+		case TRIANGLE_RGB:
+			n_channels = 3;
+			tuple_sz = 3 * (2 + n_channels);
+			break;
+		case TRIANGLE_RGBA:
+			n_channels = 4;
+			tuple_sz = 3 * (2 + n_channels);
+			break;
+		}
+
+		if (n_channels != g.source_n_channels) {
+			fprintf(stderr, "mismatch: work file (%s) has %d channels, but image file (%s) has %d channels\n", config->work_path, n_channels, config->image_path, g.source_n_channels);
+			exit(EXIT_FAILURE);
+		}
+
+		long c0 = ftell(f);
+		assert(c0 >= 0);
+		fseek(f, 0, SEEK_END);
+		long sz = ftell(f);
+		assert(sz >= 0);
+		long bodysz = sz-c0;
+		arrsetlen(g.chosen_vs, bodysz / sizeof(g.chosen_vs[0]));
+		if ((arrlen(g.chosen_vs) % tuple_sz) != 0) {
+			fprintf(stderr, "%s: bad size\n", config->work_path);
+			exit(EXIT_FAILURE);
+		}
+		fseek(f, c0, SEEK_SET);
+		if (fread(g.chosen_vs, bodysz, 1, f) != 1) {
+			fprintf(stderr, "%s: read error\n", config->work_path);
+			exit(EXIT_FAILURE);
+		}
+		fclose(f);
+	}
 
 	const size_t canvas_image_sz = g.source_width*g.source_height*g.source_n_channels*sizeof(uint16_t);
 	g.canvas_image = malloc(canvas_image_sz);
@@ -1734,6 +1829,8 @@ static void splot_process(const char* image_path, struct config* config)
 	stat_tick();
 
 	while (frame()) {
+		update_canvas();
+
 		const int n_searches_per_draw = 1; // CFG
 		for (int i = 0; i < n_searches_per_draw; i++) {
 			process_search();
