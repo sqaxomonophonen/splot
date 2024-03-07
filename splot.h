@@ -10,7 +10,7 @@ struct level {
 
 struct config {
 	const char* image_path;
-	const char* work_path;
+	const char* soup_path;
 	struct level* levels;
 };
 
@@ -161,7 +161,7 @@ static struct {
 	enum mode mode;
 	int save_image;
 	int save_minsamps;
-	int save_work;
+	int save_soup;
 	int stretch;
 	unsigned frame_counter;
 	int max_batch_size_log2;
@@ -228,9 +228,9 @@ static struct {
 	uint16_t* chosen_vs;
 	int chosen_vs_render_cursor;
 
+	int source_n_channels;
 	int source_width;
 	int source_height;
-	int source_n_channels;
 
 	uint64_t* canvas_cum_weight;
 	int* canvas_cum_idx;
@@ -329,9 +329,14 @@ static inline struct level* get_current_level(void)
 	return &g.config->levels[i];
 }
 
-static inline int get_tri_num(void)
+static inline int get_n_triangles(void)
 {
-	return 1+(arrlen(g.chosen_vs)/(3*get_n_paint_elems()));
+	return arrlen(g.chosen_vs)/(3*get_n_paint_elems());
+}
+
+static inline int trinum(void)
+{
+	return get_n_triangles() + 1;
 }
 
 static inline double source_area(void) { return g.source_width * g.source_height; }
@@ -483,9 +488,9 @@ static void do_save_texture_ex(const char* prefix, int id2)
 {
 	char filename[1<<10];
 	if (id2 >= 0) {
-		snprintf(filename, sizeof filename, "%s_%d_%d.ppm", prefix, get_tri_num(), id2);
+		snprintf(filename, sizeof filename, "%s_%d_%d.ppm", prefix, trinum(), id2);
 	} else {
-		snprintf(filename, sizeof filename, "%s_%d.ppm", prefix, get_tri_num());
+		snprintf(filename, sizeof filename, "%s_%d.ppm", prefix, trinum());
 	}
 
 	int width = -1;
@@ -591,7 +596,7 @@ static int frame(void)
 				if (sym == '4') g.mode = MODE_DUMMY;
 				if (sym == 's') g.save_image = 1;
 				if (sym == 'm') g.save_minsamps = 1;
-				if (sym == 'w') g.save_work = 1;
+				if (sym == 'w') g.save_soup = 1;
 				if (sym == SDLK_SPACE) g.stretch = !g.stretch;
 				} break;
 			case SDL_MOUSEMOTION:
@@ -628,7 +633,7 @@ static void stat_tick(void)
 	const double dt = DIFF(now, g.stat.t0);
 	if (dt < 1.0) return;
 
-	printf("STATISTICS frame=%d tri %d\n", g.frame_counter, get_tri_num());
+	printf("STATISTICS frame=%d tri %d\n", g.frame_counter, trinum());
 	#define ST(N) \
 	{ \
 		printf("  " #N "/s = %.2f\n", (double)g.stat.N / dt); \
@@ -656,15 +661,27 @@ static inline int get_minsamp_dim(int index, int* pw, int* ph)
 	if (ph) *ph = h;
 }
 
-#define WORK_MAGIC ((uint16_t)(0x1980))
+#define SOUP_MAGIC ((uint16_t)(0x1980))
 
-static void do_save_work(void)
+static void do_save_soup(void)
 {
 	char filename[1<<10];
-	snprintf(filename, sizeof filename, "work_%d.soup", get_tri_num());
+	snprintf(filename, sizeof filename, "_%d.soup", trinum());
 	FILE* f = fopen(filename, "wb");
-	uint16_t typ = g.source_n_channels + 0x10; // XXX 0x10 could mean "triangles"
-	uint16_t header[] = { WORK_MAGIC, typ };
+	uint16_t typ;
+	switch (g.source_n_channels) {
+	case 1:
+		typ = TRIANGLE_GRAY;
+		break;
+	case 3:
+		typ = TRIANGLE_RGB;
+		break;
+	case 4:
+		typ = TRIANGLE_RGBA;
+		break;
+	default: assert(!"unhandled case");
+	}
+	uint16_t header[] = { SOUP_MAGIC, typ };
 	assert(fwrite(header, sizeof header, 1, f) == 1);
 	assert(fwrite(g.chosen_vs, arrlen(g.chosen_vs)*sizeof(g.chosen_vs[0]), 1, f) == 1);
 	fclose(f);
@@ -719,8 +736,8 @@ static void process_search(void)
 {
 	stat_tick();
 
-	if (g.save_work) do_save_work();
-	g.save_work = 0;
+	if (g.save_soup) do_save_soup();
+	g.save_soup = 0;
 
 	if (g.save_minsamps) {
 		const int n_minsamp = get_n_minsamps();
@@ -1159,7 +1176,7 @@ static void process_search(void)
 					g.best_triangle.C.x, g.best_triangle.C.y);
 			#endif
 			printf("tri %d:%d/%d :: area=%.0f; fat=%.3f; cw=%.6f; underflow=%d/%d\n",
-				get_tri_num(),
+				trinum(),
 				1+g.level_index,
 				n_levels,
 				fabs(triangle_area(g.best_triangle)),
@@ -1269,6 +1286,69 @@ static void process_draw(void)
 #define IS_Q2 "(gl_VertexID == 2 || gl_VertexID == 4)"
 #define IS_Q3 "(gl_VertexID == 5)"
 
+static void load_soup(const char* path, int expect_n_channels)
+{
+	FILE* f = fopen(path, "rb");
+	uint16_t header[2];
+	if (fread(header, sizeof header, 1, f) != 1) {
+		fprintf(stderr, "%s: could not read\n", path);
+		fclose(f);
+		exit(EXIT_FAILURE);
+	}
+	if (header[0] != SOUP_MAGIC) {
+		fprintf(stderr, "%s: not a soup file (missing magic)\n", path);
+		fclose(f);
+		exit(EXIT_FAILURE);
+	}
+
+	int n_channels = -1;
+	int tuple_sz = -1;
+	const int tnc = (2 + n_channels);
+	int typ = header[1];
+	switch (typ) {
+	case TRIANGLE_GRAY:
+		n_channels = 1;
+		tuple_sz = 3 * tnc;
+		break;
+	case TRIANGLE_RGB:
+		n_channels = 3;
+		tuple_sz = 3 * tnc;
+		break;
+	case TRIANGLE_RGBA:
+		n_channels = 4;
+		tuple_sz = 3 * tnc;
+		break;
+	default:
+		fprintf(stderr, "unhandled header[1]/type=0x%.4x\n", header[1]);
+		exit(EXIT_FAILURE);
+	}
+
+	if (expect_n_channels != 0 && n_channels != expect_n_channels) {
+		fprintf(stderr, "mismatch: expected %d channels, but soup file (%s) has %d channels\n", expect_n_channels, path, n_channels);
+		exit(EXIT_FAILURE);
+	}
+
+	if (g.source_n_channels == 0) g.source_n_channels = n_channels;
+
+	long c0 = ftell(f);
+	assert(c0 >= 0);
+	fseek(f, 0, SEEK_END);
+	long sz = ftell(f);
+	assert(sz >= 0);
+	long bodysz = sz-c0;
+	arrsetlen(g.chosen_vs, bodysz / sizeof(g.chosen_vs[0]));
+	if ((arrlen(g.chosen_vs) % tuple_sz) != 0) {
+		fprintf(stderr, "%s: bad size\n", path);
+		exit(EXIT_FAILURE);
+	}
+	fseek(f, c0, SEEK_SET);
+	if (fread(g.chosen_vs, bodysz, 1, f) != 1) {
+		fprintf(stderr, "%s: read error\n", path);
+		exit(EXIT_FAILURE);
+	}
+	fclose(f);
+}
+
 static void splot_process(struct config* config)
 {
 	g.config = config;
@@ -1288,59 +1368,8 @@ static void splot_process(struct config* config)
 	}
 	printf("%d×%dc%d\n", g.source_width, g.source_height, g.source_n_channels);
 
-	if (config->work_path != NULL) {
-		FILE* f = fopen(config->work_path, "rb");
-		uint16_t header[2];
-		if (fread(header, sizeof header, 1, f) != 1) {
-			fprintf(stderr, "%s: could not read\n", config->work_path);
-			fclose(f);
-			exit(EXIT_FAILURE);
-		}
-		if (header[0] != WORK_MAGIC) {
-			fprintf(stderr, "%s: not a work file (missing magic)\n", config->work_path);
-			fclose(f);
-			exit(EXIT_FAILURE);
-		}
-
-		int n_channels = -1;
-		int tuple_sz = -1;
-		switch (header[1]) {
-		case TRIANGLE_GRAY:
-			n_channels = 1;
-			tuple_sz = 3 * (2 + n_channels);
-			break;
-		case TRIANGLE_RGB:
-			n_channels = 3;
-			tuple_sz = 3 * (2 + n_channels);
-			break;
-		case TRIANGLE_RGBA:
-			n_channels = 4;
-			tuple_sz = 3 * (2 + n_channels);
-			break;
-		}
-
-		if (n_channels != g.source_n_channels) {
-			fprintf(stderr, "mismatch: work file (%s) has %d channels, but image file (%s) has %d channels\n", config->work_path, n_channels, config->image_path, g.source_n_channels);
-			exit(EXIT_FAILURE);
-		}
-
-		long c0 = ftell(f);
-		assert(c0 >= 0);
-		fseek(f, 0, SEEK_END);
-		long sz = ftell(f);
-		assert(sz >= 0);
-		long bodysz = sz-c0;
-		arrsetlen(g.chosen_vs, bodysz / sizeof(g.chosen_vs[0]));
-		if ((arrlen(g.chosen_vs) % tuple_sz) != 0) {
-			fprintf(stderr, "%s: bad size\n", config->work_path);
-			exit(EXIT_FAILURE);
-		}
-		fseek(f, c0, SEEK_SET);
-		if (fread(g.chosen_vs, bodysz, 1, f) != 1) {
-			fprintf(stderr, "%s: read error\n", config->work_path);
-			exit(EXIT_FAILURE);
-		}
-		fclose(f);
+	if (config->soup_path != NULL) {
+		load_soup(config->soup_path, g.source_n_channels);
 	}
 
 	const size_t canvas_image_sz = g.source_width*g.source_height*g.source_n_channels*sizeof(uint16_t);
@@ -1838,6 +1867,12 @@ static void splot_process(struct config* config)
 		g.frame_counter++;
 	}
 }
+
+#ifdef NO_PROCESS
+static uint16_t candidate_component(uint16_t src_pixel, uint16_t canvas_pixel) { assert(!"XXX"); }
+static int accept_triangle(struct triangle T, const double* grays) { assert(!"XXX"); }
+static double score_candidate(struct triangle T, double canvas_color_weight, double vertex_color_weight) { assert(!"XXX"); }
+#endif
 
 #define SPLOT_H
 #endif

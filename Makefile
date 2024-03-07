@@ -11,11 +11,12 @@ LDLIBS+=$(shell pkg-config --libs ${PKGS})
 
 OBJS=gl3w.o stb_image.o stb_ds.o
 
-all: p0
+all: p0 dumpsoup
 
 p0.o: p0.c splot.h
 
 p0: p0.o $(OBJS)
+dumpsoup: dumpsoup.o $(OBJS)
 
 clean:
 	rm -f *.o main
