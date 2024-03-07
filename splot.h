@@ -3,10 +3,9 @@
 struct level {
 	int n; // number of candidates
 	int w; // resolution; 0=source resolution
-	// these must be 0 in first level:
-	double r; // search radius
 	double cn; // color noise
 	double gn; // gray noise
+	double r; // search radius (must be 0 in first level)
 };
 
 struct config {
