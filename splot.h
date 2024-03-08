@@ -815,26 +815,32 @@ static void process_search(void)
 			for (int y = 0; y < g.source_height; y++) {
 				for (int x = 0; x < g.source_width; x++) {
 					int s = 0;
+					double fs;
 					switch (g.source_n_channels) {
 					case 1:
 						s += *(p++);
+						fs = 1.0 / 65535.0;
 						break;
 					case 3:
 						s += *(p++) * RED10K;
 						s += *(p++) * GREEN10K;
 						s += *(p++) * BLUE10K;
+						fs = 1.0 / (10000.0 * 65535.0);
 						break;
 					case 4:
 						s += *(p++) * RED10K;
 						s += *(p++) * GREEN10K;
 						s += *(p++) * BLUE10K;
 						s += *(p++) * ALPHA10K;
+						fs = 1.0 / (20000.0 * 65535.0);
 						break;
 					default: assert(!"unhandled source_n_channels");
 					}
 
 					if (s > 0) {
-						canvas_accum += s;
+						const double v = pow((double)s * fs, 0.1);
+						int64_t iv = v * 1000000.0;
+						canvas_accum += iv;
 						*(cwp++) = canvas_accum;
 						*(cip++) = pixel_index;
 					}
@@ -868,7 +874,7 @@ static void process_search(void)
 					int idx, px, py;
 					// do 50:50 between "weighted random pick" and "random
 					// pick"
-					if (iter & 1) {
+					if ((iter & 7) > 0) {
 						uint64_t find = rng_next() % g.canvas_sum;
 
 						int left = 0;
