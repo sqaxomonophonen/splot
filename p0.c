@@ -2,9 +2,9 @@
 
 static uint16_t candidate_component(uint16_t src_pixel, uint16_t canvas_pixel)
 {
-	int p = (int)src_pixel >> 3;
+	int p = (int)src_pixel >> 4;
 	//int cp = (int)canvas_pixel >> 2;
-	int cp = (int)canvas_pixel >> 2;
+	int cp = (int)canvas_pixel >> 3;
 	//cp--;
 	if (cp < 0) cp = 0;
 	assert(p >= 0);
@@ -14,7 +14,7 @@ static uint16_t candidate_component(uint16_t src_pixel, uint16_t canvas_pixel)
 
 static int accept_triangle(struct triangle T, const double* grays)
 {
-	const double thr = 3.0 / 256.0;
+	const double thr = 2.0 / 256.0;
 	if (grays[0] < thr && grays[1] < thr && grays[2] < thr) return 0;
 	const double area = triangle_area(T);
 	const double area_ratio = area / source_area();
@@ -46,10 +46,37 @@ int main(int argc, char** argv)
 		.image_path = argv[1],
 		.soup_path = (argc >= 3 ? argv[2] : NULL),
 		.levels = ((struct level[]) {
-			{ .n = 3000 , .w = 200 ,           .cn = 14.0 / 256.0 , .gn = 5.0 / 256.0 , },
-			{ .n = 500  , .w = 400 , .r = 50 , .cn =  8.0 / 256.0 , .gn = 4.0 / 256.0 , },
-			{ .n = 300  , .w = 500 , .r = 30 , .cn =  1.0 / 256.0 , .gn = 8.0 / 256.0 , } ,
-			{ .n = 30   , .w = 0   , .r = 3  , .cn =  1.0 / 256.0 , .gn = 1.0 / 256.0 , },
+			{
+				.n = 3000,
+				.w = 200,
+				.tcn = 12.0 / 256.0, .tgn = 4.0 / 256.0,
+				.vcn = 4.0 / 256.0,  .vgn = 1.0 / 256.0,
+			},
+			{
+				.n = 500,
+				.w = 400,
+				.r = 50,
+				//.tcn = 8.0 / 256.0, .tgn = 4.0 / 256.0,
+				//.vcn = 2.0 / 256.0, .vgn = 1.0 / 256.0,
+				.tcn = 1.0 / 256.0, .tgn = 1.0 / 256.0,
+				.vcn = 1.0 / 256.0, .vgn = 1.0 / 256.0,
+			},
+			{
+				.n = 300,
+				.w = 500,
+				.r = 30,
+				//.tcn = 1.0 / 256.0, .tgn = 8.0 / 256.0,
+				//.vcn = 1.0 / 256.0, .vgn = 1.0 / 256.0,
+				.tcn = 1.0 / 256.0, .tgn = 1.0 / 256.0,
+				.vcn = 1.0 / 256.0, .vgn = 1.0 / 256.0,
+			},
+			{
+				.n = 30,
+				.w = 0,
+				.r = 3,
+				.tcn = 1.0 / 256.0, .tgn = 1.0 / 256.0,
+				.vcn = 1.0 / 256.0, .vgn = 1.0 / 256.0,
+			},
 			{ 0 },
 		}),
 	}));

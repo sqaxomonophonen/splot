@@ -3,8 +3,10 @@
 struct level {
 	int n; // number of candidates
 	int w; // resolution; 0=source resolution
-	double cn; // color noise
-	double gn; // gray noise
+	double tcn; // triangle color noise
+	double tgn; // triangle gray noise
+	double vcn; // vertex color noise
+	double vgn; // vertex gray noise
 	double r; // search radius (must be 0 in first level)
 };
 
@@ -732,6 +734,13 @@ static void update_canvas(void)
 	glUseProgram(0); CHKGL;
 }
 
+static inline double noise64(double s)
+{
+	if (s == 0.0) return 0.0;
+	s *= 65535.0;
+	return rng_nextf()*s - s*0.5;
+}
+
 static void process_search(void)
 {
 	stat_tick();
@@ -846,16 +855,20 @@ static void process_search(void)
 
 	int batch_index = 0;
 	const int max_batch_size = 1 << g.max_batch_size_log2;
+	int iter = 0;
 	for (batch_index = 0; batch_index < max_batch_size && g.n_trials_remaining > 0; batch_index++, g.n_trials_remaining--) {
 		uint16_t* v0 = arraddnptr(g.vtxbuf, 3*get_n_trial_elems());
 		const int max_attempts = 100; // CFG?
 		for (int attempt = 0; attempt < max_attempts; attempt++) {
 			uint16_t* vp = v0;
 			if (g.level_index == 0) {
+				iter++;
 				for (int point = 0; point < 3; point++) {
 					assert(g.canvas_sum > 0);
 					int idx, px, py;
-					if (attempt < max_attempts/2) { // CFG?
+					// do 50:50 between "weighted random pick" and "random
+					// pick"
+					if (iter & 1) {
 						uint64_t find = rng_next() % g.canvas_sum;
 
 						int left = 0;
@@ -923,16 +936,20 @@ static void process_search(void)
 
 			const int nt = get_n_trial_elems();
 
-			double grays[] = {0,0,0};
-			const double gs = (65535.0 * lvl->gn);
-			const double cs = (65535.0 * lvl->cn);
-			const double gn = gs == 0.0 ? 0.0 : rng_nextf() * gs - gs*0.5;
+			double grays[3];
+
+			double tgn = noise64(lvl->tgn);
+			double tcn[4];
+			for (int i = 0; i < g.source_n_channels; i++) tcn[i] = noise64(lvl->tcn);
 			for (int point = 0; point < 3; point++) {
 				uint16_t* vp = &v0[point*nt+3];
+				double vgn = noise64(lvl->vgn);
 				for (int i = 0; i < g.source_n_channels; i++) {
 					int c = vp[i];
-					c += gn;
-					if (cs != 0.0) c += rng_nextf() * cs - cs*0.5;
+					c += tgn;
+					c += vgn;
+					c += tcn[i];
+					c += noise64(lvl->vcn);
 					if (c < 0) c = 0;
 					if (c > 65535) c = 65535;
 					vp[i] = c;
