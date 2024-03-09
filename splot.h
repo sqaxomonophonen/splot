@@ -622,7 +622,7 @@ static int frame(void)
 }
 
 static uint16_t candidate_component(uint16_t src_pixel, uint16_t canvas_pixel);
-static int accept_triangle(struct triangle, const double* grays);
+static int accept_triangle(struct triangle, const double* grays, int level);
 static double score_candidate(struct triangle, double canvas_color_weight, double vertex_color_weight);
 
 static void stat_tick(void)
@@ -656,8 +656,8 @@ static void stat_tick(void)
 
 static inline int get_minsamp_dim(int index, int* pw, int* ph)
 {
-	const int w = g.config->levels[index].w;
-	assert(w > 0);
+	int w = g.config->levels[index].w;
+	if (w == 0) w = g.source_width;
 	const int h = (g.source_height * w + g.source_width-1) / g.source_width;
 	if (pw) *pw = w;
 	if (ph) *ph = h;
@@ -741,6 +741,16 @@ static inline double noise64(double s)
 	return rng_nextf()*s - s*0.5;
 }
 
+static inline int intmax(int a, int b)
+{
+	return a > b ? a : b;
+}
+
+static inline int intabs(int v)
+{
+	return v > 0 ? v : -v;
+}
+
 static void process_search(void)
 {
 	stat_tick();
@@ -814,33 +824,44 @@ static void process_search(void)
 			int pixel_index = 0;
 			for (int y = 0; y < g.source_height; y++) {
 				for (int x = 0; x < g.source_width; x++) {
-					int s = 0;
-					double fs;
+					//int s = 0;
+					//double fs;
+					int maxval = -1;
 					switch (g.source_n_channels) {
 					case 1:
-						s += *(p++);
-						fs = 1.0 / 65535.0;
+						//s += *(p++);
+						//fs = 1.0 / 65535.0;
+						maxval = intmax(maxval, *(p++));
 						break;
 					case 3:
-						s += *(p++) * RED10K;
-						s += *(p++) * GREEN10K;
-						s += *(p++) * BLUE10K;
-						fs = 1.0 / (10000.0 * 65535.0);
+						//s += *(p++) * RED10K;
+						//s += *(p++) * GREEN10K;
+						//s += *(p++) * BLUE10K;
+						//fs = 1.0 / (10000.0 * 65535.0);
+						maxval = intmax(maxval, *(p++));
+						maxval = intmax(maxval, *(p++));
+						maxval = intmax(maxval, *(p++));
 						break;
 					case 4:
-						s += *(p++) * RED10K;
-						s += *(p++) * GREEN10K;
-						s += *(p++) * BLUE10K;
-						s += *(p++) * ALPHA10K;
-						fs = 1.0 / (20000.0 * 65535.0);
+						//s += *(p++) * RED10K;
+						//s += *(p++) * GREEN10K;
+						//s += *(p++) * BLUE10K;
+						//s += *(p++) * ALPHA10K;
+						//fs = 1.0 / (20000.0 * 65535.0);
+						maxval = intmax(maxval, *(p++));
+						maxval = intmax(maxval, *(p++));
+						maxval = intmax(maxval, *(p++));
+						maxval = intmax(maxval, *(p++));
 						break;
 					default: assert(!"unhandled source_n_channels");
 					}
 
-					if (s > 0) {
-						const double v = pow((double)s * fs, 0.1);
-						int64_t iv = v * 1000000.0;
-						canvas_accum += iv;
+					if (maxval > 0) {
+						//const double v = pow((double)s * fs, 0.1);
+						//int64_t iv = v * 1000000.0;
+						//canvas_accum += iv;
+						//printf("maxval=%d\n", maxval);
+						canvas_accum += pow((double)maxval * (1.0 / 65535.0), 0.9) * 1000000.0;
 						*(cwp++) = canvas_accum;
 						*(cip++) = pixel_index;
 					}
@@ -865,42 +886,57 @@ static void process_search(void)
 	for (batch_index = 0; batch_index < max_batch_size && g.n_trials_remaining > 0; batch_index++, g.n_trials_remaining--) {
 		uint16_t* v0 = arraddnptr(g.vtxbuf, 3*get_n_trial_elems());
 		const int max_attempts = 100; // CFG?
-		for (int attempt = 0; attempt < max_attempts; attempt++) {
+		for (;;) {
 			uint16_t* vp = v0;
 			if (g.level_index == 0) {
-				iter++;
 				for (int point = 0; point < 3; point++) {
 					assert(g.canvas_sum > 0);
-					int idx, px, py;
-					// do 50:50 between "weighted random pick" and "random
-					// pick"
-					if ((iter & 7) > 0) {
-						uint64_t find = rng_next() % g.canvas_sum;
+					int idx, px, py, px0, py0;
+					const int maxdist = 50 + (rng_next() % 300);
 
-						int left = 0;
-						int right = g.canvas_n_weights;
-						int n_iterations = 0;
-						while (left < right) {
-							n_iterations++;
-							int mid = (left + right) >> 1;
-							uint64_t wk = g.canvas_cum_weight[mid];
-							if (wk > find) {
-								right = mid;
-							} else {
-								left = mid + 1;
+					for (;;) {
+						iter++;
+						if ((iter & 7) > 0) {
+							uint64_t find = rng_next() % g.canvas_sum;
+
+							int left = 0;
+							int right = g.canvas_n_weights;
+							int n_iterations = 0;
+							while (left < right) {
+								n_iterations++;
+								int mid = (left + right) >> 1;
+								uint64_t wk = g.canvas_cum_weight[mid];
+								if (wk > find) {
+									right = mid;
+								} else {
+									left = mid + 1;
+								}
 							}
-						}
 
-						const int cidx = (right-1) < 0 ? 0 : (right-1);
-						assert(cidx >= 0);
-						idx = g.canvas_cum_idx[cidx];
-						px = idx % g.source_width;
-						py = idx / g.source_width;
-					} else {
-						uint64_t r0 = rng_next() % g.canvas_sum;
-						px = r0 % g.source_width;
-						py = (r0/g.source_width) % g.source_height;
-						idx = px + py * g.source_width;
+							const int cidx = (right-1) < 0 ? 0 : (right-1);
+							assert(cidx >= 0);
+							idx = g.canvas_cum_idx[cidx];
+							px = idx % g.source_width;
+							py = idx / g.source_width;
+						} else {
+							uint64_t r0 = rng_next() % g.canvas_sum;
+							px = r0 % g.source_width;
+							py = (r0/g.source_width) % g.source_height;
+							idx = px + py * g.source_width;
+						}
+						if (point == 0) {
+							px0 = px;
+							py0 = py;
+							break;
+						}
+						if (intabs(px-px0) > maxdist) continue;
+						if (intabs(py-py0) > maxdist) continue;
+						break;
+
+						//const int shift = (rng_next() % 12);
+						//const int mask = (1 << shift) - 1;
+						//rng_next() & mask;
+
 					}
 					uint16_t* canvas_pixel = &g.canvas_image[idx*g.source_n_channels];
 					uint16_t* src_pixel = &g.source_image[idx*g.source_n_channels];
@@ -1005,7 +1041,7 @@ static void process_search(void)
 				signed_area = triangle_area(T);
 			}
 			assert(signed_area >= 0.0);
-			if (accept_triangle(T, grays)) {
+			if (accept_triangle(T, grays, g.level_index)) {
 				g.stat.n_accepted_triangles++;
 				break;
 			}
@@ -1882,7 +1918,7 @@ static void splot_process(struct config* config)
 	while (frame()) {
 		update_canvas();
 
-		const int n_searches_per_draw = 1; // CFG
+		const int n_searches_per_draw = 10; // CFG
 		for (int i = 0; i < n_searches_per_draw; i++) {
 			process_search();
 		}
@@ -1893,7 +1929,7 @@ static void splot_process(struct config* config)
 
 #ifdef NO_PROCESS
 static uint16_t candidate_component(uint16_t src_pixel, uint16_t canvas_pixel) { assert(!"XXX"); }
-static int accept_triangle(struct triangle T, const double* grays) { assert(!"XXX"); }
+static int accept_triangle(struct triangle T, const double* grays, int level) { assert(!"XXX"); }
 static double score_candidate(struct triangle T, double canvas_color_weight, double vertex_color_weight) { assert(!"XXX"); }
 #endif
 
