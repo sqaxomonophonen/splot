@@ -622,6 +622,7 @@ static int frame(void)
 }
 
 static uint16_t candidate_component(uint16_t src_pixel, uint16_t canvas_pixel);
+static int get_maxdist(void);
 static int accept_triangle(struct triangle, const double* grays, int level);
 static double score_candidate(struct triangle, double canvas_color_weight, double vertex_color_weight);
 
@@ -824,30 +825,17 @@ static void process_search(void)
 			int pixel_index = 0;
 			for (int y = 0; y < g.source_height; y++) {
 				for (int x = 0; x < g.source_width; x++) {
-					//int s = 0;
-					//double fs;
 					int maxval = -1;
 					switch (g.source_n_channels) {
 					case 1:
-						//s += *(p++);
-						//fs = 1.0 / 65535.0;
 						maxval = intmax(maxval, *(p++));
 						break;
 					case 3:
-						//s += *(p++) * RED10K;
-						//s += *(p++) * GREEN10K;
-						//s += *(p++) * BLUE10K;
-						//fs = 1.0 / (10000.0 * 65535.0);
 						maxval = intmax(maxval, *(p++));
 						maxval = intmax(maxval, *(p++));
 						maxval = intmax(maxval, *(p++));
 						break;
 					case 4:
-						//s += *(p++) * RED10K;
-						//s += *(p++) * GREEN10K;
-						//s += *(p++) * BLUE10K;
-						//s += *(p++) * ALPHA10K;
-						//fs = 1.0 / (20000.0 * 65535.0);
 						maxval = intmax(maxval, *(p++));
 						maxval = intmax(maxval, *(p++));
 						maxval = intmax(maxval, *(p++));
@@ -857,11 +845,7 @@ static void process_search(void)
 					}
 
 					if (maxval > 0) {
-						//const double v = pow((double)s * fs, 0.1);
-						//int64_t iv = v * 1000000.0;
-						//canvas_accum += iv;
-						//printf("maxval=%d\n", maxval);
-						canvas_accum += pow((double)maxval * (1.0 / 65535.0), 0.9) * 1000000.0;
+						canvas_accum += maxval;
 						*(cwp++) = canvas_accum;
 						*(cip++) = pixel_index;
 					}
@@ -892,7 +876,7 @@ static void process_search(void)
 				for (int point = 0; point < 3; point++) {
 					assert(g.canvas_sum > 0);
 					int idx, px, py, px0, py0;
-					const int maxdist = 50 + (rng_next() % 300);
+					const int maxdist = get_maxdist();
 
 					for (;;) {
 						iter++;
@@ -1929,6 +1913,7 @@ static void splot_process(struct config* config)
 
 #ifdef NO_PROCESS
 static uint16_t candidate_component(uint16_t src_pixel, uint16_t canvas_pixel) { assert(!"XXX"); }
+static int get_maxdist(void) { assert(!"XXX"); }
 static int accept_triangle(struct triangle T, const double* grays, int level) { assert(!"XXX"); }
 static double score_candidate(struct triangle T, double canvas_color_weight, double vertex_color_weight) { assert(!"XXX"); }
 #endif
